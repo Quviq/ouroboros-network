@@ -246,6 +246,7 @@ prop_socket_send_recv initiatorAddr responderAddr f xs =
         (AcceptedConnectionsLimit maxBound maxBound 0)
         responderAddr
         unversionedHandshakeCodec
+        noTimeLimitsHandshake
         (cborTermVersionDataCodec unversionedProtocolDataCodec)
         acceptableVersion
         (unversionedProtocol (SomeResponderApplication responderApp))
@@ -254,6 +255,7 @@ prop_socket_send_recv initiatorAddr responderAddr f xs =
           connectToNode
             snocket
             unversionedHandshakeCodec
+            noTimeLimitsHandshake
             (cborTermVersionDataCodec unversionedProtocolDataCodec)
             (NetworkConnectTracers activeMuxTracer nullTracer)
             acceptableVersion
@@ -490,6 +492,7 @@ prop_socket_client_connect_error _ xs =
       <- try $ False <$ connectToNode
         (socketSnocket iomgr)
         unversionedHandshakeCodec
+        noTimeLimitsHandshake
         (cborTermVersionDataCodec unversionedProtocolDataCodec)
         nullNetworkConnectTracers
         acceptableVersion

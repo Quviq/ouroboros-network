@@ -99,7 +99,12 @@ data HandshakeArguments connectionId vNumber vData m application = HandshakeArgu
 
       -- | accept version, first argument is our version data the second
       -- argument is the remote version data.
-      haAcceptVersion :: vData -> vData -> Accept vData
+      haAcceptVersion :: vData -> vData -> Accept vData,
+
+      -- | 'Driver' timeouts for 'Handshake' protocol.
+      --
+      haTimeLimits
+        :: ProtocolTimeLimits (Handshake vNumber CBOR.Term)
     }
 
 
@@ -126,7 +131,8 @@ runHandshakeClient bearer
                      haHandshakeCodec,
                      haVersionDataCodec,
                      haVersions,
-                     haAcceptVersion
+                     haAcceptVersion,
+                     haTimeLimits
                    } =
     tryHandshake
       (fst <$>
@@ -134,7 +140,7 @@ runHandshakeClient bearer
           (WithMuxBearer connectionId `contramap` haHandshakeTracer)
           haHandshakeCodec
           byteLimitsHandshake
-          timeLimitsHandshake
+          haTimeLimits
           (fromChannel (muxBearerAsChannel bearer handshakeProtocolNum InitiatorDir))
           (handshakeClientPeer haVersionDataCodec haAcceptVersion haVersions))
 
