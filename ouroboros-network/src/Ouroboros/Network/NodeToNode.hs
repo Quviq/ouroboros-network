@@ -413,7 +413,7 @@ connectTo
   -> Socket.SockAddr
   -> IO ()
 connectTo sn tr =
-    connectToNode sn nodeToNodeHandshakeCodec
+    connectToNode sn nodeToNodeHandshakeCodec timeLimitsHandshake
                   (cborTermVersionDataCodec nodeToNodeCodecCBORTerm)
                   tr acceptableVersion
 
@@ -445,6 +445,7 @@ withServer sn tracers networkState acceptedConnectionsLimit sd versions errPolic
     acceptedConnectionsLimit
     sd
     nodeToNodeHandshakeCodec
+    timeLimitsHandshake
     (cborTermVersionDataCodec nodeToNodeCodecCBORTerm)
     acceptableVersion
     (SomeResponderApplication <$> versions)
@@ -487,6 +488,7 @@ ipSubscriptionWorker
         (connectToNode'
           sn
           nodeToNodeHandshakeCodec
+          timeLimitsHandshake
           (cborTermVersionDataCodec nodeToNodeCodecCBORTerm)
           (NetworkConnectTracers nsMuxTracer nsHandshakeTracer)
           acceptableVersion
@@ -530,6 +532,7 @@ dnsSubscriptionWorker
       (connectToNode'
         sn
         nodeToNodeHandshakeCodec
+        timeLimitsHandshake
         (cborTermVersionDataCodec nodeToNodeCodecCBORTerm)
         (NetworkConnectTracers ndstMuxTracer ndstHandshakeTracer)
         acceptableVersion
