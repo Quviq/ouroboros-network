@@ -169,7 +169,8 @@ runHandshakeServer bearer
                      haHandshakeCodec,
                      haVersionDataCodec,
                      haVersions,
-                     haAcceptVersion
+                     haAcceptVersion,
+                     haTimeLimits
                    } =
     tryHandshake
       (fst <$>
@@ -177,6 +178,6 @@ runHandshakeServer bearer
           (WithMuxBearer connectionId `contramap` haHandshakeTracer)
           haHandshakeCodec
           byteLimitsHandshake
-          timeLimitsHandshake
+          haTimeLimits
           (fromChannel (muxBearerAsChannel bearer handshakeProtocolNum ResponderDir))
           (handshakeServerPeer haVersionDataCodec haAcceptVersion haVersions))
