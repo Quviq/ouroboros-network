@@ -27,6 +27,7 @@ module Test.Ouroboros.Network.PeerSelection.MockEnvironment (
     singletonScript,
 
     tests,
+    prop_shrinkCarefully_GovernorMockEnvironment
 
   ) where
 
@@ -63,6 +64,7 @@ import           Test.Ouroboros.Network.PeerSelection.Script
 import           Test.Ouroboros.Network.PeerSelection.PeerGraph
 import           Test.Ouroboros.Network.PeerSelection.LocalRootPeers
                    as LocalRootPeers hiding (tests)
+import           Test.Ouroboros.Network.ShrinkCarefully
 
 import           Test.QuickCheck
 import           Test.Tasty (TestTree, localOption, testGroup)
@@ -80,6 +82,9 @@ tests =
     , testProperty "arbitrary for GovernorMockEnvironment" prop_arbitrary_GovernorMockEnvironment
     , localOption (QuickCheckMaxSize 30) $
       testProperty "shrink for GovernorMockEnvironment"    prop_shrink_GovernorMockEnvironment
+    , testProperty "shrink GovernorMockEnvironment carefully"
+        prop_shrinkCarefully_GovernorMockEnvironment
+
     ]
 
 
@@ -106,7 +111,7 @@ data GovernorMockEnvironment = GovernorMockEnvironment {
        pickWarmPeersToDemote   :: PickScript,
        pickColdPeersToForget   :: PickScript
      }
-  deriving Show
+  deriving (Eq,Show)
 
 data PeerConn m = PeerConn !PeerAddr !(TVar m PeerStatus)
 
@@ -554,3 +559,6 @@ prop_shrink_GovernorMockEnvironment :: GovernorMockEnvironment -> Bool
 prop_shrink_GovernorMockEnvironment =
     all validGovernorMockEnvironment . shrink
 
+prop_shrinkCarefully_GovernorMockEnvironment ::
+  ShrinkCarefully GovernorMockEnvironment -> Property
+prop_shrinkCarefully_GovernorMockEnvironment = prop_shrinkCarefully

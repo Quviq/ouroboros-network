@@ -19,6 +19,8 @@ module Test.Ouroboros.Network.PeerSelection.PeerGraph (
 
     prop_arbitrary_PeerGraph,
     prop_shrink_PeerGraph,
+    prop_shrinkCarefully_PeerGraph,
+    prop_shrinkCarefully_GovernorScripts
 
   ) where
 
@@ -35,6 +37,7 @@ import           Control.Monad.Class.MonadTime
 
 import           Test.Ouroboros.Network.PeerSelection.Instances
 import           Test.Ouroboros.Network.PeerSelection.Script
+import           Test.Ouroboros.Network.ShrinkCarefully
 
 import           Test.QuickCheck
 
@@ -205,8 +208,9 @@ instance Arbitrary GovernorScripts where
       | gossipScript' <- shrink gossipScript
       ]
       ++
-      [ GovernorScripts gossipScript (fixConnectionScript connectionScript')
-      | connectionScript' <- shrink connectionScript
+      [ GovernorScripts gossipScript connectionScript'
+      | connectionScript' @ (Script script) <- shrink connectionScript,
+        fst (NonEmpty.last script) == Noop
       ]
 
 -- | We ensure that eventually the connection script will allow to connect to
@@ -337,3 +341,8 @@ prop_shrink_PeerGraph :: PeerGraph -> Bool
 prop_shrink_PeerGraph =
     all validPeerGraph . shrink
 
+prop_shrinkCarefully_PeerGraph :: ShrinkCarefully PeerGraph -> Property
+prop_shrinkCarefully_PeerGraph = prop_shrinkCarefully
+
+prop_shrinkCarefully_GovernorScripts :: ShrinkCarefully GovernorScripts -> Property
+prop_shrinkCarefully_GovernorScripts = prop_shrinkCarefully
