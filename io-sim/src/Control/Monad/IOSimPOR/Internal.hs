@@ -518,7 +518,9 @@ data Thread s a = Thread {
     threadThrowTo :: ![(SomeException, Labelled ThreadId)],
     threadClockId :: !ClockId,
     threadLabel   :: Maybe ThreadLabel,
-    threadNextTId :: !Int
+    threadNextTId :: !Int,
+    threadStep    :: !Int,
+    threadVClock  :: !VectorClock
   }
 
 -- We hide the type @b@ here, so it's useful to bundle these two parts
@@ -542,13 +544,17 @@ data ControlStack s b a where
              -> ControlStack s c a
              -> ControlStack s b a
 
-newtype ThreadId  = ThreadId  [Int] deriving (Eq, Ord, Show)
-newtype TVarId    = TVarId    Int   deriving (Eq, Ord, Enum, Show)
-newtype TimeoutId = TimeoutId Int   deriving (Eq, Ord, Enum, Show)
-newtype ClockId   = ClockId   [Int] deriving (Eq, Ord, Show)
+newtype ThreadId    = ThreadId  [Int] deriving (Eq, Ord, Show)
+newtype TVarId      = TVarId    Int   deriving (Eq, Ord, Enum, Show)
+newtype TimeoutId   = TimeoutId Int   deriving (Eq, Ord, Enum, Show)
+newtype ClockId     = ClockId   [Int] deriving (Eq, Ord, Show)
+newtype VectorClock = VectorClock (Map ThreadId Int)
 
 unTimeoutId :: TimeoutId -> Int
 unTimeoutId (TimeoutId a) = a
+
+unVectorClock :: VectorClock -> Map ThreadId Int
+unVectorClock (VectorClock m) = m
 
 type ThreadLabel = String
 type TVarLabel   = String
@@ -684,7 +690,8 @@ schedule thread@Thread{
            threadId      = tid,
            threadControl = ThreadControl action ctl,
            threadMasking = maskst,
-           threadLabel   = tlbl
+           threadLabel   = tlbl,
+           threadVClock  = vClock
          }
          simstate@SimState {
            runqueue,
@@ -882,6 +889,8 @@ schedule thread@Thread{
                             , threadClockId = threadClockId thread
                             , threadLabel   = Nothing
                             , threadNextTId = 1
+                            , threadStep    = 0
+                            , threadVClock  = VectorClock (Map.insert tid' 0 (unVectorClock vClock))
                             }
           threads' = Map.insert tid' thread'' threads
       -- A newly forked thread will have a higher priority, so we deschedule this one.
@@ -1219,7 +1228,9 @@ runSimTraceST mainAction = schedule mainThread initialState
         threadThrowTo = [],
         threadClockId = ClockId [],
         threadLabel   = Just "main",
-        threadNextTId = 1
+        threadNextTId = 1,
+        threadStep    = 0,
+        threadVClock  = VectorClock (Map.singleton (ThreadId []) 0)
       }
 
 
