@@ -45,6 +45,7 @@ module Control.Monad.IOSimPOR.Internal (
 
 import           Prelude hiding (read)
 
+import           Data.Ord
 import           Data.Dynamic (Dynamic, toDyn)
 import           Data.Foldable (traverse_)
 import qualified Data.List as List
@@ -646,7 +647,7 @@ initialState =
       threads  = Map.empty,
       curTime  = Time 0,
       timers   = PSQ.empty,
-      clocks   = Map.singleton (ClockId [1]) epoch1970,
+      clocks   = Map.singleton (ClockId []) epoch1970,
       nextVid  = TVarId 0,
       nextTmid = TimeoutId 0
     }
@@ -666,7 +667,7 @@ invariant Nothing SimState{runqueue,threads,clocks} =
     all (`Map.member` threads) runqueue
  && and [ threadBlocked t == (threadId t `notElem` runqueue)
         | t <- Map.elems threads ]
- && runqueue == List.nub runqueue
+ && and (zipWith (>) runqueue (drop 1 runqueue))
  && and [ threadClockId t `Map.member` clocks
         | t <- Map.elems threads ]
 
@@ -883,8 +884,10 @@ schedule thread@Thread{
                             , threadNextTId = 1
                             }
           threads' = Map.insert tid' thread'' threads
-      trace <- schedule thread' simstate { runqueue = runqueue ++ [tid']
-                                         , threads  = threads' }
+      -- A newly forked thread will have a higher priority, so we deschedule this one.
+      trace <- deschedule Yield thread'
+                 simstate { runqueue = List.insertBy (comparing Down) tid' runqueue
+                          , threads  = threads' }
       return (Trace time tid tlbl (EventThreadForked tid') trace)
 
     Atomically a k -> execAtomically time tid tlbl nextVid (runSTM a) $ \res ->
@@ -896,13 +899,7 @@ schedule thread@Thread{
               (unblocked,
                simstate') = unblockThreads wakeup simstate
           vids <- traverse (\(SomeTVar tvar) -> labelledTVarId tvar) written
-              -- We don't interrupt runnable threads to provide fairness
-              -- anywhere else. We do it here by putting the tx that committed
-              -- a transaction to the back of the runqueue, behind all other
-              -- runnable threads, and behind the unblocked threads.
-              -- For testing, we should have a more sophisticated policy to show
-              -- that algorithms are not sensitive to the exact policy, so long
-              -- as it is a fair policy (all runnable threads eventually run).
+              -- We deschedule a thread after a transaction... another may have woken up.
           trace <- deschedule Yield thread' simstate' { nextVid  = nextVid' }
           return $
             Trace time tid tlbl (EventTxCommitted vids [nextVid..pred nextVid']) $
@@ -1013,15 +1010,10 @@ data Deschedule = Yield | Interruptable | Blocked | Terminated
 deschedule :: Deschedule -> Thread s a -> SimState s a -> ST s (Trace a)
 deschedule Yield thread simstate@SimState{runqueue, threads} =
 
-    -- We don't interrupt runnable threads to provide fairness anywhere else.
-    -- We do it here by putting the thread to the back of the runqueue, behind
-    -- all other runnable threads.
-    --
-    -- For testing, we should have a more sophisticated policy to show that
-    -- algorithms are not sensitive to the exact policy, so long as it is a
-    -- fair policy (all runnable threads eventually run).
+    -- We don't interrupt runnable threads anywhere else.
+    -- We do it here by inserting the current thread into the runqueue in priority order.
 
-    let runqueue' = runqueue ++ [threadId thread]
+    let runqueue' = List.insertBy (comparing Down) (threadId thread) runqueue
         threads'  = Map.insert (threadId thread) thread threads in
     reschedule simstate { runqueue = runqueue', threads  = threads' }
 
@@ -1134,7 +1126,7 @@ unblockThreads wakeup simstate@SimState {runqueue, threads} =
     -- To preserve our invariants (that threadBlocked is correct)
     -- we update the runqueue and threads together here
     (unblocked, simstate {
-                  runqueue = runqueue ++ unblocked,
+                  runqueue = foldr (List.insertBy (comparing Down)) runqueue unblocked,
                   threads  = threads'
                 })
   where
@@ -1220,12 +1212,12 @@ runSimTraceST mainAction = schedule mainThread initialState
   where
     mainThread =
       Thread {
-        threadId      = ThreadId [1],
+        threadId      = ThreadId [],
         threadControl = ThreadControl (runIOSim mainAction) MainFrame,
         threadBlocked = False,
         threadMasking = Unmasked,
         threadThrowTo = [],
-        threadClockId = ClockId [1],
+        threadClockId = ClockId [],
         threadLabel   = Just "main",
         threadNextTId = 1
       }
