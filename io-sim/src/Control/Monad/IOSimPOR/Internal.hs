@@ -924,12 +924,16 @@ schedule thread@Thread{
 
     Atomically a k -> execAtomically time tid tlbl nextVid (runSTM a) $ \res ->
       case res of
-        StmTxCommitted x written nextVid' -> do
+        StmTxCommitted x read written nextVid' -> do
           (wakeup, wokeby) <- threadsUnblockedByWrites written
           mapM_ (\(SomeTVar tvar) -> unblockAllThreadsFromTVar tvar) written
-          let thread'     = thread { threadControl = ThreadControl (k x) ctl }
+          vClockRead <- lubTVarVClocks read
+          let vClock'     = vClock `lubVClock` vClockRead
+              thread'     = thread { threadControl = ThreadControl (k x) ctl,
+                                     threadVClock  = vClock' }
               (unblocked,
                simstate') = unblockThreads vClock wakeup simstate
+          sequence_ [ modifySTRef (tvarVClock r) (lubVClock vClock') | SomeTVar r <- written ]
           vids <- traverse (\(SomeTVar tvar) -> labelledTVarId tvar) written
               -- We deschedule a thread after a transaction... another may have woken up.
           trace <- deschedule Yield thread' simstate' { nextVid  = nextVid' }
@@ -942,16 +946,20 @@ schedule thread@Thread{
               , let Just vids' = Set.toList <$> Map.lookup tid' wokeby ]
               trace
 
-        StmTxAborted e -> do
+        StmTxAborted read e -> do
           -- schedule this thread to immediately raise the exception
-          let thread' = thread { threadControl = ThreadControl (Throw e) ctl }
+          vClockRead <- lubTVarVClocks read
+          let thread' = thread { threadControl = ThreadControl (Throw e) ctl,
+                                 threadVClock  = vClock `lubVClock` vClockRead }
           trace <- schedule thread' simstate
           return $ Trace time tid tlbl EventTxAborted trace
 
         StmTxBlocked read -> do
           mapM_ (\(SomeTVar tvar) -> blockThreadOnTVar tid tvar) read
           vids <- traverse (\(SomeTVar tvar) -> labelledTVarId tvar) read
-          trace <- deschedule Blocked thread simstate
+          vClockRead <- lubTVarVClocks read
+          let thread' = thread { threadVClock  = vClock `lubVClock` vClockRead }
+          trace <- deschedule Blocked thread' simstate
           return $ Trace time tid tlbl (EventTxBlocked vids) trace
 
     GetThreadId k -> do
@@ -1142,7 +1150,7 @@ reschedule simstate@SimState{ runqueue = [], threads, timers, curTime = time } =
         (wakeup, wokeby) <- threadsUnblockedByWrites written
         mapM_ (\(SomeTVar tvar) -> unblockAllThreadsFromTVar tvar) written
 
-        -- TODO: the vector clock below cannot be right
+        -- TODO: the vector clock below cannot be right, can it?
         let (unblocked,
              simstate') = unblockThreads bottomVClock wakeup simstate
         trace <- reschedule simstate' { curTime = time'
@@ -1287,8 +1295,8 @@ data TVar s a = TVar {
        --
        tvarCurrent :: !(STRef s a),
 
-       -- | A stack of undo values. This is only used while executing a
-       -- transaction.
+       -- | A stack of undo values and their vector clocks. This is
+       -- only used while executing a transaction.
        --
        tvarUndo    :: !(STRef s [a]),
 
@@ -1298,7 +1306,11 @@ data TVar s a = TVar {
        -- To avoid duplicates efficiently, the operations rely on a copy of the
        -- thread Ids represented as a set.
        --
-       tvarBlocked :: !(STRef s ([ThreadId], Set ThreadId))
+       tvarBlocked :: !(STRef s ([ThreadId], Set ThreadId)),
+
+       -- | The vector clock of the current value.
+       --
+       tvarVClock :: !(STRef s VectorClock)
      }
 
 instance Eq (TVar s a) where
@@ -1309,15 +1321,22 @@ data StmTxResult s a =
        -- of first write) so that the scheduler can unblock other threads that
        -- were blocked in STM transactions that read any of these vars.
        --
+       -- It reports the vars that were read, so we can update vector clocks
+       -- appropriately.
+       --
        -- It also includes the updated TVarId name supply.
        --
-       StmTxCommitted a [SomeTVar s] TVarId -- updated TVarId name supply
+       StmTxCommitted a [SomeTVar s] [SomeTVar s] TVarId -- updated TVarId name supply
 
        -- | A blocked transaction reports the vars that were read so that the
        -- scheduler can block the thread on those vars.
        --
      | StmTxBlocked  [SomeTVar s]
-     | StmTxAborted  SomeException
+
+       -- | An aborted transaction reports the vars that were read so that the
+       -- vector clock can be updated.
+       --
+     | StmTxAborted  [SomeTVar s] SomeException
 
 data SomeTVar s where
   SomeTVar :: !(TVar s a) -> SomeTVar s
@@ -1374,7 +1393,8 @@ execAtomically time tid tlbl nextVid0 action0 k0 =
                     ) written
 
           -- Return the vars written, so readers can be unblocked
-          k0 $ StmTxCommitted x (reverse writtenSeq) nextVid
+          k0 $ StmTxCommitted x (Map.elems read)
+                                (reverse writtenSeq) nextVid
 
         OrElseLeftFrame _b k writtenOuter writtenOuterSeq ctl' -> do
           -- Commit the TVars written in this sub-transaction that are also
@@ -1407,7 +1427,7 @@ execAtomically time tid tlbl nextVid0 action0 k0 =
       ThrowStm e -> do
         -- Revert all the TVar writes
         traverse_ (\(SomeTVar tvar) -> revertTVar tvar) written
-        k0 $ StmTxAborted (toException e)
+        k0 $ StmTxAborted (Map.elems read) (toException e)
 
       Retry -> case ctl of
         AtomicallyFrame -> do
@@ -1437,7 +1457,11 @@ execAtomically time tid tlbl nextVid0 action0 k0 =
 
       NewTVar !mbLabel x k -> do
         v <- execNewTVar nextVid mbLabel x
-        go ctl read written writtenSeq (succ nextVid) (k v)
+        -- record a write to the TVar so we know to update its VClock
+        let written' = Map.insert (tvarId v) (SomeTVar v) written
+        -- save the value: it will be committed or reverted
+        saveTVar v
+        go ctl read written' (SomeTVar v : writtenSeq) (succ nextVid) (k v)
 
       LabelTVar !label tvar k -> do
         writeSTRef (tvarLabel tvar) $! (Just label)
@@ -1509,8 +1533,9 @@ execNewTVar nextVid !mbLabel x = do
     tvarCurrent <- newSTRef x
     tvarUndo    <- newSTRef []
     tvarBlocked <- newSTRef ([], Set.empty)
+    tvarVClock  <- newSTRef bottomVClock
     return TVar {tvarId = nextVid, tvarLabel,
-                 tvarCurrent, tvarUndo, tvarBlocked}
+                 tvarCurrent, tvarUndo, tvarBlocked, tvarVClock}
 
 execReadTVar :: TVar s a -> ST s a
 execReadTVar TVar{tvarCurrent} = readSTRef tvarCurrent
@@ -1541,6 +1566,10 @@ commitTVar TVar{tvarUndo} = do
 readTVarUndos :: TVar s a -> ST s [a]
 readTVarUndos TVar{tvarUndo} = readSTRef tvarUndo
 
+lubTVarVClocks :: [SomeTVar s] -> ST s VectorClock
+lubTVarVClocks tvars =
+  foldr lubVClock bottomVClock <$>
+    sequence [readSTRef (tvarVClock r) | SomeTVar r <- tvars]
 
 --
 -- Blocking and unblocking on TVars
