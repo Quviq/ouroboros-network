@@ -1031,13 +1031,21 @@ threadInterruptible thread =
 data Deschedule = Yield | Interruptable | Blocked | Terminated
 
 deschedule :: Deschedule -> Thread s a -> SimState s a -> ST s (Trace a)
-deschedule Yield thread simstate@SimState{runqueue, threads} =
+deschedule Yield thread@Thread {
+                   threadId     = tid,
+                   threadStep   = tstep,
+                   threadVClock = VectorClock tvc
+                 }
+                 simstate@SimState{runqueue, threads} =
 
     -- We don't interrupt runnable threads anywhere else.
     -- We do it here by inserting the current thread into the runqueue in priority order.
 
-    let runqueue' = List.insertBy (comparing Down) (threadId thread) runqueue
-        threads'  = Map.insert (threadId thread) thread threads in
+    let thread' = thread { threadStep   = tstep + 1,
+                           threadVClock = VectorClock $ Map.insert tid (tstep+1) tvc
+                         }
+        runqueue' = List.insertBy (comparing Down) tid runqueue
+        threads'  = Map.insert tid thread' threads in
     reschedule simstate { runqueue = runqueue', threads  = threads' }
 
 deschedule Interruptable thread@Thread {
