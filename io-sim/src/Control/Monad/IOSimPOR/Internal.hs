@@ -929,7 +929,7 @@ schedule thread@Thread{
           mapM_ (\(SomeTVar tvar) -> unblockAllThreadsFromTVar tvar) written
           let thread'     = thread { threadControl = ThreadControl (k x) ctl }
               (unblocked,
-               simstate') = unblockThreads wakeup simstate
+               simstate') = unblockThreads vClock wakeup simstate
           vids <- traverse (\(SomeTVar tvar) -> labelledTVarId tvar) written
               -- We deschedule a thread after a transaction... another may have woken up.
           trace <- deschedule Yield thread' simstate' { nextVid  = nextVid' }
@@ -1019,7 +1019,7 @@ schedule thread@Thread{
                   , threadBlocked = False
                   , threadMasking = MaskedInterruptible }
               simstate'@SimState { threads = threads' }
-                         = snd (unblockThreads [tid'] simstate)
+                         = snd (unblockThreads vClock [tid'] simstate)
               threads''  = Map.adjust adjustTarget tid' threads'
               simstate'' = simstate' { threads = threads'' }
 
@@ -1062,7 +1062,8 @@ deschedule Interruptable thread@Thread {
                            threadControl = ThreadControl _ ctl,
                            threadMasking = Unmasked,
                            threadThrowTo = (e, tid') : etids,
-                           threadLabel   = tlbl
+                           threadLabel   = tlbl,
+                           threadVClock  = vClock
                          }
                          simstate@SimState{ curTime = time, threads } = do
 
@@ -1073,7 +1074,7 @@ deschedule Interruptable thread@Thread {
                          , threadMasking = MaskedInterruptible
                          , threadThrowTo = etids }
         (unblocked,
-         simstate') = unblockThreads [l_labelled tid'] simstate
+         simstate') = unblockThreads vClock [l_labelled tid'] simstate
     trace <- deschedule Yield thread' simstate'
     return $ Trace time tid tlbl (EventThrowToUnmasked tid')
            $ traceMany [ (time, tid'', tlbl'', EventThrowToWakeup)
@@ -1100,12 +1101,13 @@ deschedule Blocked thread simstate@SimState{threads} =
         threads' = Map.insert (threadId thread') thread' threads in
     reschedule simstate { threads = threads' }
 
-deschedule Terminated thread simstate@SimState{ curTime = time, threads } = do
+deschedule Terminated thread@Thread { threadVClock = vClock }
+                      simstate@SimState{ curTime = time, threads } = do
     -- This thread is done. If there are other threads blocked in a
     -- ThrowTo targeted at this thread then we can wake them up now.
     let wakeup      = map (l_labelled . snd) (reverse (threadThrowTo thread))
         (unblocked,
-         simstate') = unblockThreads wakeup simstate
+         simstate') = unblockThreads vClock wakeup simstate
     trace <- reschedule simstate'
     return $ traceMany
                [ (time, tid', tlbl', EventThrowToWakeup)
@@ -1140,8 +1142,9 @@ reschedule simstate@SimState{ runqueue = [], threads, timers, curTime = time } =
         (wakeup, wokeby) <- threadsUnblockedByWrites written
         mapM_ (\(SomeTVar tvar) -> unblockAllThreadsFromTVar tvar) written
 
+        -- TODO: the vector clock below cannot be right
         let (unblocked,
-             simstate') = unblockThreads wakeup simstate
+             simstate') = unblockThreads bottomVClock wakeup simstate
         trace <- reschedule simstate' { curTime = time'
                                       , timers  = timers' }
         return $
@@ -1161,8 +1164,8 @@ reschedule simstate@SimState{ runqueue = [], threads, timers, curTime = time } =
         TimeoutFired     -> error "MonadTimer(Sim): invariant violation"
         TimeoutCancelled -> return ()
 
-unblockThreads :: [ThreadId] -> SimState s a -> ([ThreadId], SimState s a)
-unblockThreads wakeup simstate@SimState {runqueue, threads} =
+unblockThreads :: VectorClock -> [ThreadId] -> SimState s a -> ([ThreadId], SimState s a)
+unblockThreads vClock wakeup simstate@SimState {runqueue, threads} =
     -- To preserve our invariants (that threadBlocked is correct)
     -- we update the runqueue and threads together here
     (unblocked, simstate {
@@ -1179,7 +1182,9 @@ unblockThreads wakeup simstate@SimState {runqueue, threads} =
                 ]
     -- and in which case we mark them as now running
     threads'  = List.foldl'
-                  (flip (Map.adjust (\t -> t { threadBlocked = False })))
+                  (flip (Map.adjust
+                    (\t -> t { threadBlocked = False,
+                               threadVClock = vClock `lubVClock` threadVClock t })))
                   threads unblocked
 
 
