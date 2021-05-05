@@ -8,11 +8,12 @@
 {-# LANGUAGE NumericUnderscores         #-}
 {-# LANGUAGE RecordWildCards            #-}
 {-# LANGUAGE ScopedTypeVariables        #-}
+{-# LANGUAGE StandaloneDeriving         #-}
 
 
 {-# OPTIONS_GHC -Wno-orphans #-}
 
-module Test.Ouroboros.Network.PeerSelection (tests) where
+module Test.Ouroboros.Network.PeerSelection where
 
 import qualified Data.ByteString.Char8 as BS
 import           Data.Function (on)
@@ -22,6 +23,8 @@ import           Data.Set (Set)
 import qualified Data.Set as Set
 import           Data.Void (Void)
 
+import           Control.Applicative
+import           Control.Exception(SomeException)
 import           Control.Monad.Class.MonadTime
 import           Control.Tracer (Tracer (..))
 
@@ -44,6 +47,7 @@ import qualified Test.Ouroboros.Network.PeerSelection.MockEnvironment
 import           Test.QuickCheck
 import           Test.Tasty (TestTree, testGroup)
 import           Test.Tasty.QuickCheck (testProperty)
+import           Text.Pretty.Simple
 
 
 tests :: TestTree
@@ -97,6 +101,7 @@ tests =
 prop_governor_nolivelock :: GovernorMockEnvironment -> Property
 prop_governor_nolivelock env =
     within 10_000_000 $
+    whenFail (pPrint env) $
     let trace = takeFirstNHours 24 .
                 selectGovernorEvents .
                 selectPeerSelectionTraceEvents $
@@ -111,6 +116,17 @@ prop_governor_nolivelock env =
                  [show (maxEvents 5 trace `div` envSize)] $
 -}
        hasOutput trace
+
+       -- Check we don't fall into a repeating cycle of events
+       -- (up to six events repeated exactly).
+  .&&. case lookForLoops trace of
+         Nothing -> property True
+         Just (pref,loop) ->
+           counterexample "Looping!" $
+           whenFail (pPrint pref) $
+           counterexample "Entering loop:" $
+           whenFail (pPrint loop) $
+           property False
 
        -- Check we don't get too many events within a given time span.
        -- How many events is too many? It scales with the graph size.
@@ -131,6 +147,12 @@ prop_governor_nolivelock env =
     hasOutput []    = counterexample "no trace output" $
                       property (isEmptyEnv env)
 
+    lookForLoops [] = empty
+    lookForLoops xs@(x:xs') =
+      foldr (<|>)
+        (do (pref,loop) <- lookForLoops xs'; return (x:pref,loop))
+        [return ([],take i xs) | i <- [1..6], take 100 xs == take 100 (drop i xs)]
+
     envSize         = length g + length (targets env)
                         where PeerGraph g = peerGraph env
     maxEvents n     = maximum
@@ -141,8 +163,20 @@ prop_governor_nolivelock env =
     timeSpans :: Int -> [(Time, a)] -> [[(Time, a)]]
     timeSpans _ []           = []
     timeSpans n (x@(t,_):xs) =
-      let (xs', xs'') = span (\(t',_) -> t' <= addTime (fromIntegral n) t) (x:xs)
-       in xs' : timeSpans n xs''
+      let (xs', xs'') = span (\(t',_) -> t' <= addTime (fromIntegral n) t) xs
+       in (x:xs') : timeSpans n xs''
+
+-- To check for loops, we need Eq instances, including for
+-- SomeException! Perhaps these should be available more generally.
+
+-- An orphan instance, needed to derive Eq TracePeerSelection. Nicer
+-- would be to wrap SomeException in a newtype and use that in
+-- TracePeerSelection instead... but this could be a lot of work.
+
+instance Eq SomeException where 
+  e == e' = show e == show e'
+
+deriving instance Eq a => Eq (TracePeerSelection a)
 
 isEmptyEnv :: GovernorMockEnvironment -> Bool
 isEmptyEnv GovernorMockEnvironment {

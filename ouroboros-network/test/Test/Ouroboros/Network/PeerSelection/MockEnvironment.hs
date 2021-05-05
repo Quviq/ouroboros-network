@@ -51,7 +51,7 @@ import qualified Control.Monad.Fail as Fail
 import           Control.Tracer (Tracer (..), contramap, traceWith)
 
 import           Control.Monad.Class.MonadTimer hiding (timeout)
-import           Control.Monad.IOSim
+import           Control.Monad.IOSimPOR
 
 import           Ouroboros.Network.PeerSelection.Governor hiding
                      (PeerSelectionState (..))
