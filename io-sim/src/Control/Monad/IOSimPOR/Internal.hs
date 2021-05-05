@@ -1065,7 +1065,7 @@ deschedule Interruptable thread@Thread {
                          , threadThrowTo = etids }
         (unblocked,
          simstate') = unblockThreads [l_labelled tid'] simstate
-    trace <- schedule thread' simstate'
+    trace <- deschedule Yield thread' simstate'
     return $ Trace time tid tlbl (EventThrowToUnmasked tid')
            $ traceMany [ (time, tid'', tlbl'', EventThrowToWakeup)
                        | tid'' <- unblocked
