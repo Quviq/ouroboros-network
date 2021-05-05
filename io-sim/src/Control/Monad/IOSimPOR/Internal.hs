@@ -567,8 +567,17 @@ newtype VectorClock = VectorClock (Map ThreadId Int)
 unTimeoutId :: TimeoutId -> Int
 unTimeoutId (TimeoutId a) = a
 
-unVectorClock :: VectorClock -> Map ThreadId Int
-unVectorClock (VectorClock m) = m
+bottomVClock :: VectorClock
+bottomVClock = VectorClock Map.empty
+
+insertVClock :: ThreadId -> Int -> VectorClock -> VectorClock
+insertVClock tid step (VectorClock m) = VectorClock (Map.insert tid step m)
+
+lubVClock :: VectorClock -> VectorClock -> VectorClock
+lubVClock (VectorClock m) (VectorClock m') = VectorClock (Map.unionWith max m m')
+
+hbfVClock :: VectorClock -> VectorClock -> Bool
+hbfVClock (VectorClock m) (VectorClock m') = Map.isSubmapOfBy (<=) m m'
 
 type ThreadLabel = String
 type TVarLabel   = String
@@ -904,7 +913,7 @@ schedule thread@Thread{
                             , threadLabel   = Nothing
                             , threadNextTId = 1
                             , threadStep    = 0
-                            , threadVClock  = VectorClock (Map.insert tid' 0 (unVectorClock vClock))
+                            , threadVClock  = insertVClock tid' 0 vClock
                             }
           threads' = Map.insert tid' thread'' threads
       -- A newly forked thread will have a higher priority, so we deschedule this one.
@@ -1034,7 +1043,7 @@ deschedule :: Deschedule -> Thread s a -> SimState s a -> ST s (Trace a)
 deschedule Yield thread@Thread {
                    threadId     = tid,
                    threadStep   = tstep,
-                   threadVClock = VectorClock tvc
+                   threadVClock = tvc
                  }
                  simstate@SimState{runqueue, threads} =
 
@@ -1042,7 +1051,7 @@ deschedule Yield thread@Thread {
     -- We do it here by inserting the current thread into the runqueue in priority order.
 
     let thread' = thread { threadStep   = tstep + 1,
-                           threadVClock = VectorClock $ Map.insert tid (tstep+1) tvc
+                           threadVClock = insertVClock tid (tstep+1) tvc
                          }
         runqueue' = List.insertBy (comparing Down) tid runqueue
         threads'  = Map.insert tid thread' threads in
@@ -1252,7 +1261,7 @@ runSimTraceST mainAction = schedule mainThread initialState
         threadLabel   = Just "main",
         threadNextTId = 1,
         threadStep    = 0,
-        threadVClock  = VectorClock (Map.singleton (ThreadId []) 0)
+        threadVClock  = insertVClock (ThreadId []) 0 bottomVClock
       }
 
 
