@@ -571,7 +571,7 @@ bottomVClock :: VectorClock
 bottomVClock = VectorClock Map.empty
 
 insertVClock :: ThreadId -> Int -> VectorClock -> VectorClock
-insertVClock tid step (VectorClock m) = VectorClock (Map.insert tid step m)
+insertVClock tid !step (VectorClock m) = VectorClock (Map.insert tid step m)
 
 lubVClock :: VectorClock -> VectorClock -> VectorClock
 lubVClock (VectorClock m) (VectorClock m') = VectorClock (Map.unionWith max m m')
@@ -1295,8 +1295,8 @@ data TVar s a = TVar {
        --
        tvarCurrent :: !(STRef s a),
 
-       -- | A stack of undo values and their vector clocks. This is
-       -- only used while executing a transaction.
+       -- | A stack of undo values. This is only used while executing a
+       -- transaction.
        --
        tvarUndo    :: !(STRef s [a]),
 
