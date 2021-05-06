@@ -534,7 +534,8 @@ data Thread s a = Thread {
     threadLabel   :: Maybe ThreadLabel,
     threadNextTId :: !Int,
     threadStep    :: !Int,
-    threadVClock  :: !VectorClock
+    threadVClock  :: !VectorClock,
+    threadEffect  :: !Effect  -- in the current step
   }
 
 -- We hide the type @b@ here, so it's useful to bundle these two parts
@@ -714,7 +715,8 @@ schedule thread@Thread{
            threadControl = ThreadControl action ctl,
            threadMasking = maskst,
            threadLabel   = tlbl,
-           threadVClock  = vClock
+           threadVClock  = vClock,
+           threadEffect  = effect
          }
          simstate@SimState {
            runqueue,
@@ -902,7 +904,8 @@ schedule thread@Thread{
       let nextTId  = threadNextTId thread
           tid'     = let ThreadId is = tid in ThreadId $ is++[nextTId]
           thread'  = thread { threadControl = ThreadControl (k tid') ctl,
-                              threadNextTId = nextTId + 1 }
+                              threadNextTId = nextTId + 1,
+                              threadEffect  = effect <> forkEffect tid' }
           thread'' = Thread { threadId      = tid'
                             , threadControl = ThreadControl (runIOSim a)
                                                             ForkFrame
@@ -914,6 +917,7 @@ schedule thread@Thread{
                             , threadNextTId = 1
                             , threadStep    = 0
                             , threadVClock  = insertVClock tid' 0 vClock
+                            , threadEffect  = mempty
                             }
           threads' = Map.insert tid' thread'' threads
       -- A newly forked thread will have a higher priority, so we deschedule this one.
@@ -929,8 +933,12 @@ schedule thread@Thread{
           mapM_ (\(SomeTVar tvar) -> unblockAllThreadsFromTVar tvar) written
           vClockRead <- lubTVarVClocks read
           let vClock'     = vClock `lubVClock` vClockRead
+              effect'     = effect
+                         <> readEffects read
+                         <> writeEffects written
               thread'     = thread { threadControl = ThreadControl (k x) ctl,
-                                     threadVClock  = vClock' }
+                                     threadVClock  = vClock',
+                                     threadEffect  = effect' }
               (unblocked,
                simstate') = unblockThreads vClock wakeup simstate
           sequence_ [ modifySTRef (tvarVClock r) (lubVClock vClock') | SomeTVar r <- written ]
@@ -949,8 +957,10 @@ schedule thread@Thread{
         StmTxAborted read e -> do
           -- schedule this thread to immediately raise the exception
           vClockRead <- lubTVarVClocks read
-          let thread' = thread { threadControl = ThreadControl (Throw e) ctl,
-                                 threadVClock  = vClock `lubVClock` vClockRead }
+          let effect' = effect <> readEffects read
+              thread' = thread { threadControl = ThreadControl (Throw e) ctl,
+                                 threadVClock  = vClock `lubVClock` vClockRead,
+                                 threadEffect  = effect' }
           trace <- schedule thread' simstate
           return $ Trace time tid tlbl EventTxAborted trace
 
@@ -958,7 +968,9 @@ schedule thread@Thread{
           mapM_ (\(SomeTVar tvar) -> blockThreadOnTVar tid tvar) read
           vids <- traverse (\(SomeTVar tvar) -> labelledTVarId tvar) read
           vClockRead <- lubTVarVClocks read
-          let thread' = thread { threadVClock  = vClock `lubVClock` vClockRead }
+          let effect' = effect <> readEffects read
+              thread' = thread { threadVClock  = vClock `lubVClock` vClockRead,
+                                 threadEffect  = effect' }
           trace <- deschedule Blocked thread' simstate
           return $ Trace time tid tlbl (EventTxBlocked vids) trace
 
@@ -1051,7 +1063,8 @@ deschedule :: Deschedule -> Thread s a -> SimState s a -> ST s (Trace a)
 deschedule Yield thread@Thread {
                    threadId     = tid,
                    threadStep   = tstep,
-                   threadVClock = tvc
+                   threadVClock = tvc,
+                   threadEffect = effect
                  }
                  simstate@SimState{runqueue, threads} =
 
@@ -1059,7 +1072,8 @@ deschedule Yield thread@Thread {
     -- We do it here by inserting the current thread into the runqueue in priority order.
 
     let thread' = thread { threadStep   = tstep + 1,
-                           threadVClock = insertVClock tid (tstep+1) tvc
+                           threadVClock = insertVClock tid (tstep+1) tvc,
+                           threadEffect = mempty
                          }
         runqueue' = List.insertBy (comparing Down) tid runqueue
         threads'  = Map.insert tid thread' threads in
@@ -1274,7 +1288,8 @@ runSimTraceST mainAction = schedule mainThread initialState
         threadLabel   = Just "main",
         threadNextTId = 1,
         threadStep    = 0,
-        threadVClock  = insertVClock (ThreadId []) 0 bottomVClock
+        threadVClock  = insertVClock (ThreadId []) 0 bottomVClock,
+        threadEffect  = mempty
       }
 
 
@@ -1620,3 +1635,39 @@ ordNub = go Set.empty
     go !s (x:xs)
       | x `Set.member` s = go s xs
       | otherwise        = x : go (Set.insert x s) xs
+
+-- Effects
+
+data Effect = Effect {
+    effectReads  :: !(Set TVarId),
+    effectWrites :: !(Set TVarId),
+    effectForks  :: !(Set ThreadId)
+  }
+  deriving Show
+
+instance Semigroup Effect where
+  Effect r w s <> Effect r' w' s' = Effect (r<>r') (w<>w') (s<>s')
+
+instance Monoid Effect where
+  mempty = Effect Set.empty Set.empty Set.empty
+
+readEffect :: SomeTVar s -> Effect
+readEffect r = mempty{effectReads = Set.singleton $ someTvarId r }
+
+readEffects :: [SomeTVar s] -> Effect
+readEffects rs = mempty{effectReads = Set.fromList (map someTvarId rs)}
+
+writeEffect :: SomeTVar s -> Effect
+writeEffect r = mempty{effectWrites = Set.singleton $ someTvarId r }
+
+writeEffects :: [SomeTVar s] -> Effect
+writeEffects rs = mempty{effectWrites = Set.fromList (map someTvarId rs)}
+
+forkEffect :: ThreadId -> Effect
+forkEffect tid = mempty{effectForks = Set.singleton $ tid}
+
+someTvarId :: SomeTVar s -> TVarId
+someTvarId (SomeTVar r) = tvarId r
+
+
+
