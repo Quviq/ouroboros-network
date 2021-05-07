@@ -1483,7 +1483,7 @@ execAtomically time tid tlbl nextVid0 action0 k0 =
         go ctl read written writtenSeq nextVid k
 
       ReadTVar v k
-        | tvarId v `Map.member` read -> do
+        | tvarId v `Map.member` read || tvarId v `Map.member` written -> do
             x <- execReadTVar v
             go ctl read written writtenSeq nextVid (k x)
         | otherwise -> do
