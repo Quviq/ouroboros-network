@@ -563,7 +563,7 @@ newtype ThreadId    = ThreadId  [Int] deriving (Eq, Ord, Show)
 newtype TVarId      = TVarId    Int   deriving (Eq, Ord, Enum, Show)
 newtype TimeoutId   = TimeoutId Int   deriving (Eq, Ord, Enum, Show)
 newtype ClockId     = ClockId   [Int] deriving (Eq, Ord, Show)
-newtype VectorClock = VectorClock (Map ThreadId Int)
+newtype VectorClock = VectorClock (Map ThreadId Int) deriving Show
 
 unTimeoutId :: TimeoutId -> Int
 unTimeoutId (TimeoutId a) = a
@@ -579,6 +579,9 @@ lubVClock (VectorClock m) (VectorClock m') = VectorClock (Map.unionWith max m m'
 
 hbfVClock :: VectorClock -> VectorClock -> Bool
 hbfVClock (VectorClock m) (VectorClock m') = Map.isSubmapOfBy (<=) m m'
+
+hbfStep :: ThreadId -> Int -> VectorClock -> Bool
+hbfStep tid tstep (VectorClock m) = Just tstep <= Map.lookup tid m
 
 type ThreadLabel = String
 type TVarLabel   = String
@@ -667,7 +670,9 @@ data SimState s a = SimState {
        -- | list of clocks
        clocks   :: !(Map ClockId UTCTime),
        nextVid  :: !TVarId,     -- ^ next unused 'TVarId'
-       nextTmid :: !TimeoutId   -- ^ next unused 'TimeoutId'
+       nextTmid :: !TimeoutId,  -- ^ next unused 'TimeoutId'
+       -- | previous steps (which we may race with)
+       races    :: !Races
      }
 
 initialState :: SimState s a
@@ -679,7 +684,8 @@ initialState =
       timers   = PSQ.empty,
       clocks   = Map.singleton (ClockId []) epoch1970,
       nextVid  = TVarId 0,
-      nextTmid = TimeoutId 0
+      nextTmid = TimeoutId 0,
+      races    = noRaces
     }
   where
     epoch1970 = UTCTime (fromGregorian 1970 1 1) 0
@@ -724,7 +730,8 @@ schedule thread@Thread{
            timers,
            clocks,
            nextVid, nextTmid,
-           curTime  = time
+           curTime  = time,
+           races
          } =
   assert (invariant (Just thread) simstate) $
   case action of
@@ -804,7 +811,8 @@ schedule thread@Thread{
 
     LiftST st k -> do
       x <- strictToLazyST st
-      let thread' = thread { threadControl = ThreadControl (k x) ctl }
+      let thread' = thread { threadControl = ThreadControl (k x) ctl,
+                             threadEffect  = effect <> liftSTEffect }
       schedule thread' simstate
 
     GetMonoTime k -> do
@@ -1060,24 +1068,17 @@ threadInterruptible thread =
 data Deschedule = Yield | Interruptable | Blocked | Terminated
 
 deschedule :: Deschedule -> Thread s a -> SimState s a -> ST s (Trace a)
-deschedule Yield thread@Thread {
-                   threadId     = tid,
-                   threadStep   = tstep,
-                   threadVClock = tvc,
-                   threadEffect = effect
-                 }
+deschedule Yield thread@Thread { threadId     = tid }
                  simstate@SimState{runqueue, threads} =
 
     -- We don't interrupt runnable threads anywhere else.
     -- We do it here by inserting the current thread into the runqueue in priority order.
 
-    let thread' = thread { threadStep   = tstep + 1,
-                           threadVClock = insertVClock tid (tstep+1) tvc,
-                           threadEffect = mempty
-                         }
+    let thread'   = stepThread thread
         runqueue' = List.insertBy (comparing Down) tid runqueue
         threads'  = Map.insert tid thread' threads in
-    reschedule simstate { runqueue = runqueue', threads  = threads' }
+    reschedule simstate { runqueue = runqueue', threads  = threads',
+                          races    = updateRacesInSimState thread simstate }
 
 deschedule Interruptable thread@Thread {
                            threadId      = tid,
@@ -1107,7 +1108,9 @@ deschedule Interruptable thread@Thread {
 deschedule Interruptable thread simstate =
     -- Either masked or unmasked but no pending async exceptions.
     -- Either way, just carry on.
-    schedule thread simstate
+    -- Record a step, though, in case on replay there is an async exception.
+    schedule (stepThread thread)
+             simstate{ races = updateRacesInSimState thread simstate }
 
 deschedule Blocked thread@Thread { threadThrowTo = _ : _
                                  , threadMasking = maskst } simstate
@@ -1120,8 +1123,9 @@ deschedule Blocked thread@Thread { threadThrowTo = _ : _
 
 deschedule Blocked thread simstate@SimState{threads} =
     let thread'  = thread { threadBlocked = True }
-        threads' = Map.insert (threadId thread') thread' threads in
-    reschedule simstate { threads = threads' }
+        threads' = Map.insert (threadId thread') (stepThread thread') threads in
+    reschedule simstate { threads = threads',
+                          races = updateRacesInSimState thread' simstate }
 
 deschedule Terminated thread@Thread { threadVClock = vClock }
                       simstate@SimState{ curTime = time, threads } = do
@@ -1130,7 +1134,7 @@ deschedule Terminated thread@Thread { threadVClock = vClock }
     let wakeup      = map (l_labelled . snd) (reverse (threadThrowTo thread))
         (unblocked,
          simstate') = unblockThreads vClock wakeup simstate
-    trace <- reschedule simstate'
+    trace <- reschedule simstate' { races = updateRacesInSimState thread simstate }
     return $ traceMany
                [ (time, tid', tlbl', EventThrowToWakeup)
                | tid' <- unblocked
@@ -1167,8 +1171,11 @@ reschedule simstate@SimState{ runqueue = [], threads, timers, curTime = time } =
         -- TODO: the vector clock below cannot be right, can it?
         let (unblocked,
              simstate') = unblockThreads bottomVClock wakeup simstate
-        trace <- reschedule simstate' { curTime = time'
-                                      , timers  = timers' }
+            -- currently active races are completed; we assume no
+            -- subsequent events are concurrent with them
+            simstate''  = quiescentRacesInSimState simstate'
+        trace <- reschedule simstate'' { curTime = time'
+                                       , timers  = timers' }
         return $
           traceMany ([ (time', ThreadId [-1], Just "timer", EventTimerExpired tmid)
                      | tmid <- tmids ]
@@ -1641,15 +1648,17 @@ ordNub = go Set.empty
 data Effect = Effect {
     effectReads  :: !(Set TVarId),
     effectWrites :: !(Set TVarId),
-    effectForks  :: !(Set ThreadId)
+    effectForks  :: !(Set ThreadId),
+    effectLiftST :: !Bool
   }
   deriving Show
 
 instance Semigroup Effect where
-  Effect r w s <> Effect r' w' s' = Effect (r<>r') (w<>w') (s<>s')
+  Effect r w s b <> Effect r' w' s' b'  =
+    Effect (r<>r') (w<>w') (s<>s') (b||b')
 
 instance Monoid Effect where
-  mempty = Effect Set.empty Set.empty Set.empty
+  mempty = Effect Set.empty Set.empty Set.empty False
 
 readEffect :: SomeTVar s -> Effect
 readEffect r = mempty{effectReads = Set.singleton $ someTvarId r }
@@ -1666,8 +1675,159 @@ writeEffects rs = mempty{effectWrites = Set.fromList (map someTvarId rs)}
 forkEffect :: ThreadId -> Effect
 forkEffect tid = mempty{effectForks = Set.singleton $ tid}
 
+liftSTEffect :: Effect
+liftSTEffect = mempty{ effectLiftST = True }
+
 someTvarId :: SomeTVar s -> TVarId
 someTvarId (SomeTVar r) = tvarId r
 
+onlyReadEffect :: Effect -> Bool
+onlyReadEffect Effect{ effectWrites, effectForks, effectLiftST } =
+  Set.null effectWrites &&
+  Set.null effectForks &&
+  not effectLiftST
 
+racingEffects :: Effect -> Effect -> Bool
+racingEffects e e'
+  | effectLiftST e  = racesWithLiftST e'
+  | effectLiftST e' = racesWithLiftST e
+  | otherwise =
+      not $ effectReads  e `Set.disjoint` effectWrites e'
+         && effectWrites e `Set.disjoint` effectReads  e'
+         && effectWrites e `Set.disjoint` effectWrites e'
+  where racesWithLiftST e =
+             effectLiftST e
+          || not (Set.null (effectReads e) && Set.null (effectWrites e))
+  
+-- Steps
 
+data Step = Step {
+    stepThreadId :: !ThreadId,
+    stepStep     :: !Int,
+    stepEffect   :: !Effect,
+    stepVClock   :: !VectorClock
+  }
+  deriving Show
+
+-- steps race if they can be reordered with a possibly different outcome
+racingSteps :: Step -> Step -> Bool
+racingSteps s s' =
+     stepThreadId s /= stepThreadId s'
+  && racingEffects (stepEffect s) (stepEffect s')
+
+currentStep :: Thread s a -> Step
+currentStep Thread { threadId     = tid,
+                     threadStep   = tstep,
+                     threadEffect = teffect,
+                     threadVClock = vClock
+                   } =
+  Step { stepThreadId = tid,
+         stepStep     = tstep,
+         stepEffect   = teffect,
+         stepVClock   = vClock
+       }
+
+stepThread :: Thread s a -> Thread s a
+stepThread thread@Thread { threadId     = tid,
+                           threadStep   = tstep,
+                           threadVClock = vClock } =
+  thread { threadStep   = tstep+1,
+           threadEffect = mempty,
+           threadVClock = insertVClock tid (tstep+1) vClock
+         }
+
+-- As we run a simulation, we collect info about each previous step
+data StepInfo = StepInfo {
+    stepInfoStep       :: Step,
+    -- threads that are still concurrent with this step
+    stepInfoConcurrent :: [ThreadId],
+    -- steps following this one that did not happen after it
+    -- (in reverse order)
+    stepInfoNonDep     :: [Step],
+    -- later steps that race with this one
+    stepInfoRaces      :: [Step]
+  }
+  deriving Show
+
+data Races = Races { -- These steps may still race with future steps
+                     activeRaces   :: ![StepInfo],
+                     -- These steps cannot be concurrent with future steps
+                     completeRaces :: ![StepInfo]
+                   }
+
+noRaces :: Races
+noRaces = Races [] []
+
+updateRacesInSimState :: Thread s a -> SimState s a -> Races
+-- a transaction which blocks after only reading will be rescheduled
+-- after any racing transaction anyway; it can be treated as a no-op.
+updateRacesInSimState thread@Thread{ threadBlocked = True,
+                                     threadEffect  = e }
+                      SimState{ races }
+  | onlyReadEffect e = races
+updateRacesInSimState thread SimState{ threads, races } =
+  traceRaces $
+  updateRaces (currentStep thread) (Map.keys threads) races
+
+-- We take care that steps can only race against threads in their
+-- concurrent set. When this becomes empty, a step can be retired into
+-- the "complete" category, but only if there are some steps racing
+-- with it.
+updateRaces :: Step -> [ThreadId] -> Races -> Races
+updateRaces newStep@Step{ stepThreadId = tid, stepEffect = newEffect }
+            newConcurrent
+            Races{ activeRaces, completeRaces } =
+  let new | null newConcurrent = []  -- cannot race with anything
+          | otherwise          =
+              [StepInfo { stepInfoStep       = newStep,
+                          stepInfoConcurrent = newConcurrent,
+                          stepInfoNonDep     = [],
+                          stepInfoRaces      = []
+                        }]
+      updateActive =
+        [ if tid `elem` concurrent then
+            let (nondep', concurrent')
+                  | hbfStep (stepThreadId step) (stepStep step) (stepVClock newStep) =
+                    (nondep, List.delete tid concurrent)
+                  | otherwise =
+                    (newStep : nondep, concurrent)
+                -- we record only the first race with each thread
+                races' | tid `notElem` map stepThreadId races &&
+                         racingSteps step newStep = newStep : races
+                       | otherwise                = races
+            in stepInfo { stepInfoConcurrent = Set.elems (effectForks newEffect) ++ concurrent',
+                          stepInfoNonDep     = nondep',
+                                             stepInfoRaces      = races'
+                        }
+          else stepInfo
+        | stepInfo@StepInfo { stepInfoStep       = step,
+                              stepInfoConcurrent = concurrent,
+                              stepInfoNonDep     = nondep,
+                              stepInfoRaces      = races
+                            }
+            <- activeRaces ]
+      newActive   = new ++ filter (not . null . stepInfoConcurrent) updateActive
+      newComplete = filter (not . null . stepInfoRaces)
+                      (filter (null . stepInfoConcurrent) updateActive) ++
+                    completeRaces
+  in Races { activeRaces = newActive, completeRaces = newComplete }
+
+-- We assume that steps do not race with later steps after a quiescent
+-- period. Quiescent periods end when simulated time advances, thus we
+-- are assuming here that all work is completed before a timer
+-- triggers.
+
+quiescentRacesInSimState simstate@SimState{ races } =
+  simstate{ races = quiescentRaces races }
+  
+quiescentRaces :: Races -> Races
+quiescentRaces Races{ activeRaces, completeRaces } =
+  Races{ activeRaces = [],
+         completeRaces = [s{stepInfoConcurrent = []} |
+                          s <- activeRaces,
+                          not (null (stepInfoRaces s))] ++
+                         completeRaces }
+
+traceRaces :: Races -> Races
+traceRaces r@Races{completeRaces} =
+  Debug.trace ("Tracking "++show (length (concatMap stepInfoRaces completeRaces)) ++" races") r
