@@ -529,7 +529,7 @@ data Thread s a = Thread {
     threadBlocked :: !Bool,
     threadMasking :: !MaskingState,
     -- other threads blocked in a ThrowTo to us because we are or were masked
-    threadThrowTo :: ![(SomeException, Labelled ThreadId)],
+    threadThrowTo :: ![(SomeException, Labelled ThreadId, VectorClock)],
     threadClockId :: !ClockId,
     threadLabel   :: Maybe ThreadLabel,
     threadNextTId :: !Int,
@@ -1019,7 +1019,8 @@ schedule thread@Thread{
       return (Trace time tid tlbl (EventThrowTo e tid) trace)
 
     ThrowTo e tid' k -> do
-      let thread'   = thread { threadControl = ThreadControl k ctl }
+      let thread'   = thread { threadControl = ThreadControl k ctl,
+                               threadEffect  = effect <> throwToEffect tid' }
           willBlock = case Map.lookup tid' threads of
                         Just t -> not (threadInterruptible t)
                         _      -> False
@@ -1027,7 +1028,8 @@ schedule thread@Thread{
         then do
           -- The target thread has async exceptions masked so we add the
           -- exception and the source thread id to the pending async exceptions.
-          let adjustTarget t = t { threadThrowTo = (e, Labelled tid tlbl) : threadThrowTo t }
+          let adjustTarget t =
+                t { threadThrowTo = (e, Labelled tid tlbl, vClock) : threadThrowTo t }
               threads'       = Map.adjust adjustTarget tid' threads
           trace <- deschedule Blocked thread' simstate { threads = threads' }
           return $ Trace time tid tlbl (EventThrowTo e tid')
@@ -1042,10 +1044,12 @@ schedule thread@Thread{
           -- be resolved if the thread terminates or if it leaves the exception
           -- handler (when restoring the masking state would trigger the any
           -- new pending async exception).
-          let adjustTarget t@Thread{ threadControl = ThreadControl _ ctl' } =
+          let adjustTarget t@Thread{ threadControl = ThreadControl _ ctl',
+                                     threadVClock  = vClock' } =
                 t { threadControl = ThreadControl (Throw e) ctl'
                   , threadBlocked = False
-                  , threadMasking = MaskedInterruptible }
+                  , threadMasking = MaskedInterruptible
+                  , threadVClock  = vClock' `lubVClock` vClock }
               simstate'@SimState { threads = threads' }
                          = snd (unblockThreads vClock [tid'] simstate)
               threads''  = Map.adjust adjustTarget tid' threads'
@@ -1084,7 +1088,7 @@ deschedule Interruptable thread@Thread {
                            threadId      = tid,
                            threadControl = ThreadControl _ ctl,
                            threadMasking = Unmasked,
-                           threadThrowTo = (e, tid') : etids,
+                           threadThrowTo = (e, tid', vClock') : etids,
                            threadLabel   = tlbl,
                            threadVClock  = vClock
                          }
@@ -1095,7 +1099,8 @@ deschedule Interruptable thread@Thread {
     -- if possible.
     let thread' = thread { threadControl = ThreadControl (Throw e) ctl
                          , threadMasking = MaskedInterruptible
-                         , threadThrowTo = etids }
+                         , threadThrowTo = etids
+                         , threadVClock  = vClock `lubVClock` vClock' }
         (unblocked,
          simstate') = unblockThreads vClock [l_labelled tid'] simstate
     trace <- deschedule Yield thread' simstate'
@@ -1131,7 +1136,7 @@ deschedule Terminated thread@Thread { threadVClock = vClock }
                       simstate@SimState{ curTime = time, threads } = do
     -- This thread is done. If there are other threads blocked in a
     -- ThrowTo targeted at this thread then we can wake them up now.
-    let wakeup      = map (l_labelled . snd) (reverse (threadThrowTo thread))
+    let wakeup      = map (\(_,tid',_) -> l_labelled tid') (reverse (threadThrowTo thread))
         (unblocked,
          simstate') = unblockThreads vClock wakeup simstate
     trace <- reschedule simstate' { races = updateRacesInSimState thread simstate }
@@ -1649,16 +1654,17 @@ data Effect = Effect {
     effectReads  :: !(Set TVarId),
     effectWrites :: !(Set TVarId),
     effectForks  :: !(Set ThreadId),
-    effectLiftST :: !Bool
+    effectLiftST :: !Bool,
+    effectThrows :: ![ThreadId]
   }
-  deriving Show
+  deriving (Eq, Show)
 
 instance Semigroup Effect where
-  Effect r w s b <> Effect r' w' s' b'  =
-    Effect (r<>r') (w<>w') (s<>s') (b||b')
+  Effect r w s b ts <> Effect r' w' s' b' ts' =
+    Effect (r<>r') (w<>w') (s<>s') (b||b') (ts++ts')
 
 instance Monoid Effect where
-  mempty = Effect Set.empty Set.empty Set.empty False
+  mempty = Effect Set.empty Set.empty Set.empty False []
 
 readEffect :: SomeTVar s -> Effect
 readEffect r = mempty{effectReads = Set.singleton $ someTvarId r }
@@ -1678,6 +1684,9 @@ forkEffect tid = mempty{effectForks = Set.singleton $ tid}
 liftSTEffect :: Effect
 liftSTEffect = mempty{ effectLiftST = True }
 
+throwToEffect :: ThreadId -> Effect
+throwToEffect tid = mempty{ effectThrows = [tid] }
+
 someTvarId :: SomeTVar s -> TVarId
 someTvarId (SomeTVar r) = tvarId r
 
@@ -1688,13 +1697,13 @@ onlyReadEffect Effect{ effectWrites, effectForks, effectLiftST } =
   not effectLiftST
 
 racingEffects :: Effect -> Effect -> Bool
-racingEffects e e'
-  | effectLiftST e  = racesWithLiftST e'
-  | effectLiftST e' = racesWithLiftST e
-  | otherwise =
-      not $ effectReads  e `Set.disjoint` effectWrites e'
-         && effectWrites e `Set.disjoint` effectReads  e'
-         && effectWrites e `Set.disjoint` effectWrites e'
+racingEffects e e' =
+      (effectLiftST e  && racesWithLiftST e')
+   || (effectLiftST e' && racesWithLiftST e )
+   || (not $ null $ effectThrows e `List.intersect` effectThrows e')
+   || (not $ effectReads  e `Set.disjoint` effectWrites e'
+          && effectWrites e `Set.disjoint` effectReads  e'
+          && effectWrites e `Set.disjoint` effectWrites e')
   where racesWithLiftST e =
              effectLiftST e
           || not (Set.null (effectReads e) && Set.null (effectWrites e))
@@ -1712,8 +1721,13 @@ data Step = Step {
 -- steps race if they can be reordered with a possibly different outcome
 racingSteps :: Step -> Step -> Bool
 racingSteps s s' =
-     stepThreadId s /= stepThreadId s'
-  && racingEffects (stepEffect s) (stepEffect s')
+     (stepThreadId s /= stepThreadId s'
+      && racingEffects (stepEffect s) (stepEffect s'))
+  || throwsTo s s'
+  || throwsTo s' s
+  where throwsTo s s' =
+             stepThreadId s `elem` effectThrows (stepEffect s')
+          && stepEffect s /= mempty
 
 currentStep :: Thread s a -> Step
 currentStep Thread { threadId     = tid,
