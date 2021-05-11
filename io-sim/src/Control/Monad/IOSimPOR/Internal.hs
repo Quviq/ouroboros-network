@@ -1127,8 +1127,8 @@ deschedule Blocked thread@Thread { threadThrowTo = _ : _
     deschedule Interruptable thread { threadMasking = Unmasked } simstate
 
 deschedule Blocked thread simstate@SimState{threads} =
-    let thread'  = thread { threadBlocked = True }
-        threads' = Map.insert (threadId thread') (stepThread thread') threads in
+    let thread'  = stepThread $ thread { threadBlocked = True }
+        threads' = Map.insert (threadId thread') thread' threads in
     reschedule simstate { threads = threads',
                           races = updateRacesInSimState thread' simstate }
 
@@ -1742,6 +1742,11 @@ currentStep Thread { threadId     = tid,
        }
 
 stepThread :: Thread s a -> Thread s a
+-- Do not step a thread that just blocks in a transaction
+-- It will be rescheduled automatically
+stepThread thread@Thread { threadBlocked = True,
+                           threadEffect  = effect }
+  | onlyReadEffect effect = thread
 stepThread thread@Thread { threadId     = tid,
                            threadStep   = tstep,
                            threadVClock = vClock } =
