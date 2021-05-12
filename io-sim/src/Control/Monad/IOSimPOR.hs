@@ -11,6 +11,8 @@ module Control.Monad.IOSimPOR (
   runSimStrictShutdown,
   Failure(..),
   runSimTrace,
+  controlSimTrace,
+  ScheduleControl(..),
   runSimTraceST,
   liftST,
   traceM,
@@ -29,6 +31,7 @@ module Control.Monad.IOSimPOR (
   selectTraceEventsDynamic,
   selectTraceEventsSay,
   printTraceEventsSay,
+  selectTraceRaces,
   -- * Eventlog
   EventlogEvent(..),
   EventlogMarker(..),
@@ -64,9 +67,16 @@ selectTraceEvents fn = go
     go (Trace _ _ _ ev trace) = case fn ev of
       Just x  -> x : go trace
       Nothing ->     go trace
+    go (TraceRacesFound _ trace)        = go trace
     go (TraceMainException _ e _)       = throw (FailureException e)
     go (TraceDeadlock      _   threads) = throw (FailureDeadlock threads)
     go (TraceMainReturn    _ _ _)       = []
+
+selectTraceRaces = go
+  where
+    go (Trace _ _ _ ev trace)        = go trace
+    go (TraceRacesFound races trace) = races ++ go trace
+    go _                             = []
 
 -- | Select all the traced values matching the expected type. This relies on
 -- the sim's dynamic trace facility.
@@ -151,6 +161,7 @@ traceResult :: Bool -> Trace a -> Either Failure a
 traceResult strict = go
   where
     go (Trace _ _ _ _ t)                = go t
+    go (TraceRacesFound _ t)            = go t
     go (TraceMainReturn _ _ tids@(_:_))
                                | strict = Left (FailureSloppyShutdown tids)
     go (TraceMainReturn _ x _)          = Right x
@@ -160,6 +171,7 @@ traceResult strict = go
 traceEvents :: Trace a -> [(Time, ThreadId, Maybe ThreadLabel, TraceEvent)]
 traceEvents (Trace time tid tlbl event t) = (time, tid, tlbl, event)
                                           : traceEvents t
+traceEvents (TraceRacesFound _ t)         = traceEvents t
 traceEvents _                             = []
 
 
@@ -168,3 +180,6 @@ traceEvents _                             = []
 --
 runSimTrace :: forall a. (forall s. IOSim s a) -> Trace a
 runSimTrace mainAction = runST (runSimTraceST mainAction)
+
+controlSimTrace :: forall a. ScheduleControl -> (forall s. IOSim s a) -> Trace a
+controlSimTrace control mainAction = runST (controlSimTraceST control mainAction)
