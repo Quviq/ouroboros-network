@@ -41,7 +41,9 @@ module Control.Monad.IOSimPOR.Internal (
   Trace (..),
   TraceEvent (..),
   liftST,
-  execReadTVar
+  execReadTVar,
+  controlSimTraceST,
+  ScheduleControl(..)
   ) where
 
 import           Prelude hiding (read)
@@ -89,6 +91,8 @@ import qualified Control.Monad.Class.MonadSTM as MonadSTM
 import           Control.Monad.Class.MonadThrow as MonadThrow
 import           Control.Monad.Class.MonadTime
 import           Control.Monad.Class.MonadTimer
+
+import qualified Debug.Trace as Debug
 
 {-# ANN module "HLint: ignore Use readTVarIO" #-}
 newtype IOSim s a = IOSim { unIOSim :: forall r. (a -> SimA s r) -> SimA s r }
@@ -614,10 +618,13 @@ labelledThreads threadMap =
 -- traces with 'traceM' (which generalise the @base@ library
 -- 'Debug.Trace.traceM')
 --
+-- It also contains information on races discovered.
+--
 -- See also: 'traceEvents', 'traceResult', 'selectTraceEvents',
 -- 'selectTraceEventsDynamic' and 'printTraceEventsSay'.
 --
 data Trace a = Trace !Time !ThreadId !(Maybe ThreadLabel) !TraceEvent (Trace a)
+             | TraceRacesFound    ![ScheduleMod]                      (Trace a)
              | TraceMainReturn    !Time a             ![Labelled ThreadId]
              | TraceMainException !Time SomeException ![Labelled ThreadId]
              | TraceDeadlock      !Time               ![Labelled ThreadId]
@@ -672,7 +679,9 @@ data SimState s a = SimState {
        nextVid  :: !TVarId,     -- ^ next unused 'TVarId'
        nextTmid :: !TimeoutId,  -- ^ next unused 'TimeoutId'
        -- | previous steps (which we may race with)
-       races    :: !Races
+       races    :: !Races,
+       -- | control the schedule followed
+       control  :: !ScheduleControl
      }
 
 initialState :: SimState s a
@@ -685,7 +694,8 @@ initialState =
       clocks   = Map.singleton (ClockId []) epoch1970,
       nextVid  = TVarId 0,
       nextTmid = TimeoutId 0,
-      races    = noRaces
+      races    = noRaces,
+      control  = ControlDefault
     }
   where
     epoch1970 = UTCTime (fromGregorian 1970 1 1) 0
@@ -721,6 +731,7 @@ schedule thread@Thread{
            threadControl = ThreadControl action ctl,
            threadMasking = maskst,
            threadLabel   = tlbl,
+           threadStep    = tstep,
            threadVClock  = vClock,
            threadEffect  = effect
          }
@@ -731,8 +742,21 @@ schedule thread@Thread{
            clocks,
            nextVid, nextTmid,
            curTime  = time,
-           races
-         } =
+           races,
+           control
+         }
+         
+  | controlTargets (tid,tstep) control =
+      -- Start following the specified schedule
+      -- This does not count as a step
+      deschedule Sleep thread
+                 simstate{ control = followControl control }
+      
+  | not $ controlFollows (tid,tstep) control =
+      -- we need to switch to a different thread
+      deschedule Yield thread simstate
+
+  | otherwise =
   assert (invariant (Just thread) simstate) $
   case action of
 
@@ -741,6 +765,7 @@ schedule thread@Thread{
         -- the main thread is done, so we're done
         -- even if other threads are still running
         return $ Trace time tid tlbl EventThreadFinished
+               $ traceFinalRacesFound simstate
                $ TraceMainReturn time x (labelledThreads threads)
 
       ForkFrame -> do
@@ -773,6 +798,7 @@ schedule thread@Thread{
           -- An unhandled exception in the main thread terminates the program
           return (Trace time tid tlbl (EventThrow e) $
                   Trace time tid tlbl (EventThreadUnhandled e) $
+                  traceFinalRacesFound simstate $
                   TraceMainException time e (labelledThreads threads))
 
         | otherwise -> do
@@ -1069,20 +1095,23 @@ threadInterruptible thread =
         | otherwise            -> False
       MaskedUninterruptible    -> False
 
-data Deschedule = Yield | Interruptable | Blocked | Terminated
+data Deschedule = Yield | Interruptable | Blocked | Terminated | Sleep
 
 deschedule :: Deschedule -> Thread s a -> SimState s a -> ST s (Trace a)
+
 deschedule Yield thread@Thread { threadId     = tid }
-                 simstate@SimState{runqueue, threads} =
+                 simstate@SimState{runqueue, threads, control} =
 
     -- We don't interrupt runnable threads anywhere else.
     -- We do it here by inserting the current thread into the runqueue in priority order.
 
     let thread'   = stepThread thread
         runqueue' = List.insertBy (comparing Down) tid runqueue
-        threads'  = Map.insert tid thread' threads in
+        threads'  = Map.insert tid thread' threads
+        control'  = advanceControl (threadStepId thread) control in
     reschedule simstate { runqueue = runqueue', threads  = threads',
-                          races    = updateRacesInSimState thread simstate }
+                          races    = updateRacesInSimState thread simstate,
+                          control  = control' }
 
 deschedule Interruptable thread@Thread {
                            threadId      = tid,
@@ -1110,12 +1139,13 @@ deschedule Interruptable thread@Thread {
                        , let tlbl'' = lookupThreadLabel tid'' threads ]
              trace
 
-deschedule Interruptable thread simstate =
+deschedule Interruptable thread simstate@SimState{ control } =
     -- Either masked or unmasked but no pending async exceptions.
     -- Either way, just carry on.
     -- Record a step, though, in case on replay there is an async exception.
     schedule (stepThread thread)
-             simstate{ races = updateRacesInSimState thread simstate }
+             simstate{ races = updateRacesInSimState thread simstate,
+                       control = advanceControl (threadStepId thread) control }
 
 deschedule Blocked thread@Thread { threadThrowTo = _ : _
                                  , threadMasking = maskst } simstate
@@ -1126,29 +1156,55 @@ deschedule Blocked thread@Thread { threadThrowTo = _ : _
     -- thread if possible.
     deschedule Interruptable thread { threadMasking = Unmasked } simstate
 
-deschedule Blocked thread simstate@SimState{threads} =
+deschedule Blocked thread simstate@SimState{threads, control} =
     let thread'  = stepThread $ thread { threadBlocked = True }
         threads' = Map.insert (threadId thread') thread' threads in
     reschedule simstate { threads = threads',
-                          races = updateRacesInSimState thread' simstate }
+                          races   = updateRacesInSimState thread' simstate,
+                          control = advanceControl (threadStepId thread) control }
 
-deschedule Terminated thread@Thread { threadVClock = vClock }
+deschedule Terminated thread@Thread { threadId = tid, threadVClock = vClock }
                       simstate@SimState{ curTime = time, threads } = do
     -- This thread is done. If there are other threads blocked in a
     -- ThrowTo targeted at this thread then we can wake them up now.
     let wakeup      = map (\(_,tid',_) -> l_labelled tid') (reverse (threadThrowTo thread))
         (unblocked,
          simstate') = unblockThreads vClock wakeup simstate
-    trace <- reschedule simstate' { races = updateRacesInSimState thread simstate }
+    trace <- reschedule simstate' { races = threadTerminatesRaces tid $
+                                              updateRacesInSimState thread simstate }
     return $ traceMany
                [ (time, tid', tlbl', EventThrowToWakeup)
                | tid' <- unblocked
                , let tlbl' = lookupThreadLabel tid' threads ]
                trace
 
--- When there is no current running thread but the runqueue is non-empty then
--- schedule the next one to run.
+deschedule Sleep thread@Thread { threadId = tid }
+                 simstate@SimState{runqueue, threads} =
+
+    -- This thread was targetted for sleeping at this point by
+    -- schedule control. Put it to sleep without recording a step.       
+
+    let runqueue' = List.insertBy (comparing Down) tid runqueue
+        threads'  = Map.insert tid thread threads in
+    reschedule simstate { runqueue = runqueue', threads  = threads' }
+
+
+-- Choose the next thread to run.
 reschedule :: SimState s a -> ST s (Trace a)
+
+-- If we are following a controlled schedule, just do that.
+reschedule simstate@SimState{ runqueue, threads,
+                              control=ControlFollow ((tid,tstep):_) _ } =
+    assert (tid `elem` runqueue) $
+    assert (invariant Nothing simstate) $
+  
+    let thread = threads Map.! tid in
+    assert (threadStep thread == tstep) $
+    schedule thread simstate { runqueue = List.delete tid runqueue
+                             , threads  = Map.delete tid threads }
+
+-- When there is no current running thread but the runqueue is non-empty then
+-- schedule the next one to run. 
 reschedule simstate@SimState{ runqueue = tid:runqueue', threads } =
     assert (invariant Nothing simstate) $
 
@@ -1163,7 +1219,8 @@ reschedule simstate@SimState{ runqueue = [], threads, timers, curTime = time } =
 
     -- important to get all events that expire at this time
     case removeMinimums timers of
-      Nothing -> return (TraceDeadlock time (labelledThreads threads))
+      Nothing -> return (traceFinalRacesFound simstate $
+                         TraceDeadlock time (labelledThreads threads))
 
       Just (tmids, time', fired, timers') -> assert (time' >= time) $ do
 
@@ -1287,7 +1344,10 @@ lookupThreadLabel tid threads = join (threadLabel <$> Map.lookup tid threads)
 -- more convenient way is exposed by 'runSimTrace'.
 --
 runSimTraceST :: forall s a. IOSim s a -> ST s (Trace a)
-runSimTraceST mainAction = schedule mainThread initialState
+runSimTraceST mainAction = controlSimTraceST ControlDefault mainAction
+
+controlSimTraceST control mainAction =
+  schedule mainThread initialState{ control = control }
   where
     mainThread =
       Thread {
@@ -1795,7 +1855,7 @@ updateRacesInSimState thread SimState{ threads, races } =
 updateRaces :: Step -> [ThreadId] -> Races -> Races
 updateRaces newStep@Step{ stepThreadId = tid, stepEffect = newEffect }
             newConcurrent
-            Races{ activeRaces, completeRaces } =
+            races@Races{ activeRaces } =
   let new | null newConcurrent = []  -- cannot race with anything
           | otherwise          =
               [StepInfo { stepInfoStep       = newStep,
@@ -1825,12 +1885,21 @@ updateRaces newStep@Step{ stepThreadId = tid, stepEffect = newEffect }
                               stepInfoRaces      = races
                             }
             <- activeRaces ]
-      newActive   = new ++ filter (not . null . stepInfoConcurrent) updateActive
-      newComplete = filter (not . null . stepInfoRaces)
-                      (filter (null . stepInfoConcurrent) updateActive) ++
-                    completeRaces
-  in Races { activeRaces = newActive, completeRaces = newComplete }
+  in normalizeRaces $ races { activeRaces = new ++ updateActive }
 
+-- When a thread terminates, we remove it from the concurrent thread
+-- sets of active races.
+
+threadTerminatesRaces tid races@Races{ activeRaces } =
+  let activeRaces' = [ s{stepInfoConcurrent = List.delete tid stepInfoConcurrent}
+                     | s@StepInfo{ stepInfoConcurrent } <- activeRaces ]
+  in normalizeRaces $ races{ activeRaces = activeRaces' }
+
+normalizeRaces Races{ activeRaces, completeRaces } =
+  let activeRaces' = filter (not . null. stepInfoConcurrent) activeRaces
+      completeRaces' = filter (null . stepInfoConcurrent) activeRaces ++ completeRaces
+  in Races{ activeRaces = activeRaces', completeRaces = completeRaces' }
+  
 -- We assume that steps do not race with later steps after a quiescent
 -- period. Quiescent periods end when simulated time advances, thus we
 -- are assuming here that all work is completed before a timer
@@ -1848,5 +1917,70 @@ quiescentRaces Races{ activeRaces, completeRaces } =
                          completeRaces }
 
 traceRaces :: Races -> Races
-traceRaces r@Races{completeRaces} =
-  Debug.trace ("Tracking "++show (length (concatMap stepInfoRaces completeRaces)) ++" races") r
+traceRaces r@Races{activeRaces,completeRaces} =
+  Debug.trace ("Tracking "++show (length (concatMap stepInfoRaces activeRaces)) ++" races") r
+
+-- Schedule modifications
+
+data ScheduleMod = ScheduleMod{
+    scheduleModTarget    :: StepId,
+    scheduleModInsertion :: [StepId]
+  }
+  deriving Show
+
+type StepId = (ThreadId,Int)
+
+stepId Step{ stepThreadId = tid, stepStep = n } = (tid,n)
+threadStepId Thread{ threadId, threadStep } = (threadId, threadStep)
+
+stepInfoToScheduleMods :: StepInfo -> [ScheduleMod]
+stepInfoToScheduleMods
+  StepInfo{ stepInfoStep   = step,
+            stepInfoNonDep = nondep,
+            stepInfoRaces  = races
+          } =
+  [ ScheduleMod (stepId step)
+                (map stepId (reverse nondep) ++ [stepId step'])
+  | step' <- races ]
+
+traceFinalRacesFound simstate
+  | null scheduleMods = id
+  | otherwise         = TraceRacesFound scheduleMods
+  where SimState{ races } =
+          quiescentRacesInSimState simstate
+        scheduleMods =
+          concatMap stepInfoToScheduleMods $ completeRaces races
+
+-- Schedule control
+
+data ScheduleControl = ControlDefault
+                     | ControlAwait [ScheduleMod]
+                     | ControlFollow [StepId] [ScheduleMod]
+  deriving Show
+
+controlTargets stepId
+               (ControlAwait (ScheduleMod{ scheduleModTarget }:_)) =
+  stepId == scheduleModTarget
+controlTargets stepId _ = False
+
+controlFollows stepId ControlDefault                = True
+controlFollows stepId (ControlFollow (stepId':_) _) = stepId == stepId'
+controlFollows stepId (ControlAwait (smod:_))         =
+  stepId /= scheduleModTarget smod
+
+advanceControl stepId (ControlFollow (stepId':sids) tgts) =
+  assert (stepId == stepId') $
+  case (sids,tgts) of
+    ([],[]) -> ControlDefault
+    ([],_)  -> ControlAwait tgts
+    (_,_)   -> ControlFollow sids tgts
+advanceControl stepId c =
+  assert (not $ controlTargets stepId c) $ c
+
+followControl (ControlAwait
+                 (ScheduleMod{scheduleModTarget,
+                              scheduleModInsertion}:
+                  mods)) =
+  ControlFollow (scheduleModInsertion ++ [scheduleModTarget])
+                mods
+
