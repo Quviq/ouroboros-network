@@ -48,7 +48,8 @@ library
                        pretty-simple,
                        psqueues          >=0.2 && <0.3,
                        time              >=1.9.1 && <1.11,
-                       quiet
+                       quiet,
+                       QuickCheck
 
   ghc-options:         -Wall
                        -Wcompat

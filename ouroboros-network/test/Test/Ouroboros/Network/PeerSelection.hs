@@ -24,7 +24,7 @@ import qualified Data.Set as Set
 import           Data.Void (Void)
 
 import           Control.Applicative
-import           Control.Exception(SomeException)
+import           Control.Exception --(SomeException)
 import           Control.Monad.Class.MonadTime
 import           Control.Tracer (Tracer (..))
 

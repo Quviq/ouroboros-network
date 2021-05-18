@@ -1233,9 +1233,8 @@ reschedule simstate@SimState{ runqueue = [], threads, timers, curTime = time } =
         -- TODO: the vector clock below cannot be right, can it?
         let (unblocked,
              simstate') = unblockThreads bottomVClock wakeup simstate
-            -- currently active races are completed; we assume no
-            -- subsequent events are concurrent with them
-            simstate''  = quiescentRacesInSimState simstate'
+            -- all open races will be completed and reported at this time
+            simstate''  = simstate'{ races = noRaces }
         trace <- reschedule simstate'' { curTime = time'
                                        , timers  = timers' }
         return $
@@ -1245,7 +1244,7 @@ reschedule simstate@SimState{ runqueue = [], threads, timers, curTime = time } =
                      | tid' <- unblocked
                      , let tlbl' = lookupThreadLabel tid' threads
                      , let Just vids = Set.toList <$> Map.lookup tid' wokeby ])
-                    trace
+                    $ traceFinalRacesFound simstate' trace
   where
     timeoutAction (TimerVars var bvar) = do
       x <- readTVar var
@@ -1917,8 +1916,8 @@ quiescentRaces Races{ activeRaces, completeRaces } =
                          completeRaces }
 
 traceRaces :: Races -> Races
-traceRaces r@Races{activeRaces,completeRaces} =
-  Debug.trace ("Tracking "++show (length (concatMap stepInfoRaces activeRaces)) ++" races") r
+traceRaces r@Races{activeRaces,completeRaces} = r
+--  Debug.trace ("Tracking "++show (length (concatMap stepInfoRaces activeRaces)) ++" races") r
 
 -- Schedule modifications
 
@@ -1950,6 +1949,9 @@ traceFinalRacesFound simstate
           quiescentRacesInSimState simstate
         scheduleMods =
           concatMap stepInfoToScheduleMods $ completeRaces races
+
+forgetCompletedRaces simstate@SimState{ races } =
+  simstate{ races = races{ completeRaces = [] } }
 
 -- Schedule control
 

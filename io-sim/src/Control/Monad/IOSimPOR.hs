@@ -12,6 +12,7 @@ module Control.Monad.IOSimPOR (
   Failure(..),
   runSimTrace,
   controlSimTrace,
+  exploreSimTrace,
   ScheduleControl(..),
   runSimTraceST,
   liftST,
@@ -57,6 +58,8 @@ import           Control.Monad.Class.MonadTime
 
 import           Control.Monad.IOSimPOR.Internal
 
+import           Test.QuickCheck
+
 
 selectTraceEvents
     :: (TraceEvent -> Maybe b)
@@ -77,6 +80,12 @@ selectTraceRaces = go
     go (Trace _ _ _ ev trace)        = go trace
     go (TraceRacesFound races trace) = races ++ go trace
     go _                             = []
+
+removeTraceRaces = go
+  where
+    go (Trace a b c d trace)     = Trace a b c d $ go trace
+    go (TraceRacesFound _ trace) = go trace
+    go t                         = t
 
 -- | Select all the traced values matching the expected type. This relies on
 -- the sim's dynamic trace facility.
@@ -161,7 +170,6 @@ traceResult :: Bool -> Trace a -> Either Failure a
 traceResult strict = go
   where
     go (Trace _ _ _ _ t)                = go t
-    go (TraceRacesFound _ t)            = go t
     go (TraceMainReturn _ _ tids@(_:_))
                                | strict = Left (FailureSloppyShutdown tids)
     go (TraceMainReturn _ x _)          = Right x
@@ -179,7 +187,20 @@ traceEvents _                             = []
 -- | See 'runSimTraceST' below.
 --
 runSimTrace :: forall a. (forall s. IOSim s a) -> Trace a
-runSimTrace mainAction = runST (runSimTraceST mainAction)
+runSimTrace mainAction = removeTraceRaces $ runST (runSimTraceST mainAction)
 
 controlSimTrace :: forall a. ScheduleControl -> (forall s. IOSim s a) -> Trace a
 controlSimTrace control mainAction = runST (controlSimTraceST control mainAction)
+
+-- Just an initial version, which tries to reverse ONE race
+exploreSimTrace ::
+  forall a test. Testable test =>
+    Int -> (forall s. IOSim s a) -> (Trace a -> test) -> Property
+exploreSimTrace n mainAction k =
+  let trace = controlSimTrace ControlDefault mainAction
+      races = selectTraceRaces trace
+  in k (removeTraceRaces trace) .&&.
+     conjoin
+       [ counterexample ("Schedule control: " ++ show r) $
+         k (removeTraceRaces (controlSimTrace (ControlAwait [r]) mainAction))
+       | r <- take n races ]

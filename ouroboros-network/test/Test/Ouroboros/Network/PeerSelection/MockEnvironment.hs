@@ -13,6 +13,7 @@ module Test.Ouroboros.Network.PeerSelection.MockEnvironment (
     GovernorMockEnvironment(..),
     GovernorMockEnvironmentWithoutAsyncDemotion(..),
     runGovernorInMockEnvironment,
+    exploreGovernorInMockEnvironment,
 
     TraceMockEnv(..),
     TestTraceEvent(..),
@@ -167,15 +168,20 @@ validGovernorMockEnvironment GovernorMockEnvironment {
 --
 runGovernorInMockEnvironment :: GovernorMockEnvironment -> Trace Void
 runGovernorInMockEnvironment mockEnv =
-    runSimTrace $ do
-      actions <- mockPeerSelectionActions tracerMockEnv mockEnv
-      policy  <- mockPeerSelectionPolicy                mockEnv
-      peerSelectionGovernor
-        tracerTracePeerSelection
-        tracerDebugPeerSelection
-        tracerTracePeerSelectionCounters
-        actions
-        policy
+    runSimTrace $ governorAction mockEnv
+
+governorAction mockEnv = do
+    actions <- mockPeerSelectionActions tracerMockEnv mockEnv
+    policy  <- mockPeerSelectionPolicy                mockEnv
+    peerSelectionGovernor
+      tracerTracePeerSelection
+      tracerDebugPeerSelection
+      tracerTracePeerSelectionCounters
+      actions
+      policy
+
+exploreGovernorInMockEnvironment n mockEnv k =
+    exploreSimTrace n (governorAction mockEnv) k
 
 data TraceMockEnv = TraceEnvPeersStatus (Map PeerAddr PeerStatus)
   deriving Show
@@ -419,6 +425,7 @@ selectPeerSelectionTraceEvents = go
     go (Trace t _ _ (EventLog e) trace)
      | Just x <- fromDynamic e    = (t,x) : go trace
     go (Trace _ _ _ _ trace)      =         go trace
+    go (TraceRacesFound _ trace)  =         go trace
     go (TraceMainException _ e _) = throw e
     go (TraceDeadlock      _   _) = [] -- expected result in many cases
     go (TraceMainReturn    _ _ _) = []
