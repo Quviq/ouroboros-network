@@ -970,11 +970,12 @@ schedule thread@Thread{
               effect'     = effect
                          <> readEffects read
                          <> writeEffects written
+                         <> wakeupEffects wakeup
               thread'     = thread { threadControl = ThreadControl (k x) ctl,
                                      threadVClock  = vClock',
                                      threadEffect  = effect' }
               (unblocked,
-               simstate') = unblockThreads vClock wakeup simstate
+               simstate') = unblockThreads vClock' wakeup simstate
           sequence_ [ modifySTRef (tvarVClock r) (lubVClock vClock') | SomeTVar r <- written ]
           vids <- traverse (\(SomeTVar tvar) -> labelledTVarId tvar) written
               -- We deschedule a thread after a transaction... another may have woken up.
@@ -1715,16 +1716,17 @@ data Effect = Effect {
     effectWrites :: !(Set TVarId),
     effectForks  :: !(Set ThreadId),
     effectLiftST :: !Bool,
-    effectThrows :: ![ThreadId]
+    effectThrows :: ![ThreadId],
+    effectWakeup :: ![ThreadId]
   }
   deriving (Eq, Show)
 
 instance Semigroup Effect where
-  Effect r w s b ts <> Effect r' w' s' b' ts' =
-    Effect (r<>r') (w<>w') (s<>s') (b||b') (ts++ts')
+  Effect r w s b ts wu <> Effect r' w' s' b' ts' wu' =
+    Effect (r<>r') (w<>w') (s<>s') (b||b') (ts++ts') (wu++wu')
 
 instance Monoid Effect where
-  mempty = Effect Set.empty Set.empty Set.empty False []
+  mempty = Effect Set.empty Set.empty Set.empty False [] []
 
 readEffect :: SomeTVar s -> Effect
 readEffect r = mempty{effectReads = Set.singleton $ someTvarId r }
@@ -1746,6 +1748,9 @@ liftSTEffect = mempty{ effectLiftST = True }
 
 throwToEffect :: ThreadId -> Effect
 throwToEffect tid = mempty{ effectThrows = [tid] }
+
+wakeupEffects :: [ThreadId] -> Effect
+wakeupEffects tids = mempty{effectWakeup = tids}
 
 someTvarId :: SomeTVar s -> TVarId
 someTvarId (SomeTVar r) = tvarId r
@@ -1781,10 +1786,11 @@ data Step = Step {
 -- steps race if they can be reordered with a possibly different outcome
 racingSteps :: Step -> Step -> Bool
 racingSteps s s' =
-     (stepThreadId s /= stepThreadId s'
-      && racingEffects (stepEffect s) (stepEffect s'))
-  || throwsTo s s'
-  || throwsTo s' s
+     stepThreadId s /= stepThreadId s'
+  && not (stepThreadId s' `elem` effectWakeup (stepEffect s))
+  && (racingEffects (stepEffect s) (stepEffect s')
+   || throwsTo s s'
+   || throwsTo s' s)
   where throwsTo s s' =
              stepThreadId s `elem` effectThrows (stepEffect s')
           && stepEffect s /= mempty
