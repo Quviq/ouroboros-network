@@ -1143,8 +1143,9 @@ deschedule Interruptable thread simstate@SimState{ control } =
     -- Either masked or unmasked but no pending async exceptions.
     -- Either way, just carry on.
     -- Record a step, though, in case on replay there is an async exception.
-    schedule (stepThread thread)
-             simstate{ races = updateRacesInSimState thread simstate,
+    let thread' = stepThread thread in 
+    schedule thread'
+             simstate{ races = updateRacesInSimState thread' simstate,
                        control = advanceControl (threadStepId thread) control }
 
 deschedule Blocked thread@Thread { threadThrowTo = _ : _
@@ -1801,11 +1802,13 @@ currentStep Thread { threadId     = tid,
        }
 
 stepThread :: Thread s a -> Thread s a
+{- This was wrong: we must count an execution that blocks as a step, otherwise replay can't work.
 -- Do not step a thread that just blocks in a transaction
 -- It will be rescheduled automatically
 stepThread thread@Thread { threadBlocked = True,
                            threadEffect  = effect }
   | onlyReadEffect effect = thread
+-}
 stepThread thread@Thread { threadId     = tid,
                            threadStep   = tstep,
                            threadVClock = vClock } =
