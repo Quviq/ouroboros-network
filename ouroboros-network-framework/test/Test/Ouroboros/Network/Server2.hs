@@ -14,8 +14,9 @@
 {-# OPTIONS_GHC -Wno-redundant-constraints #-}
 
 module Test.Ouroboros.Network.Server2
-  ( tests
-  ) where
+  -- ( tests
+  -- ) where
+  where
 
 import           Control.Exception (AssertionFailed)
 import           Control.Monad (replicateM)
@@ -36,6 +37,7 @@ import           Data.ByteString.Lazy (ByteString)
 import           Data.Functor (($>), (<&>))
 import           Data.List (mapAccumL, intercalate)
 import           Data.List.NonEmpty (NonEmpty (..))
+import qualified Data.Map as Map
 import           Data.Maybe (fromMaybe)
 import           Data.Typeable (Typeable)
 import           Data.Void (Void)
@@ -1030,6 +1032,135 @@ prop_bidirectional_IO data0 data1 =
               data0
               data1
 
+data ConnectionEvent peerAddr req resp acc
+  = StartClient DiffTime peerAddr (ClientAndServerData req resp acc)
+  | StartServer DiffTime peerAddr (ClientAndServerData req resp acc)
+  | ClientConnection   DiffTime peerAddr
+  | InboundNodeToNode  DiffTime peerAddr
+  | OutboundNodeToNode DiffTime peerAddr
+
+newtype MultiNodeScript peerAddr req resp acc = MultiNodeScript [ConnectionEvent peerAddr req resp acc]
+
+instance (Arbitrary peerAddr, Arbitrary req, Arbitrary resp, Arbitrary acc) =>
+         Arbitrary (MultiNodeScript peerAddr req resp acc) where
+  arbitrary = return $ MultiNodeScript []
+
+-- | Run a central server that talks to any number of clients and other nodes.
+multinodeExperiment
+    :: forall peerAddr socket acc req resp m.
+       ( ConnectionManagerMonad m
+       , MonadAsync m
+       , MonadLabelledSTM m
+       , MonadSay m
+       , Ord peerAddr, Show peerAddr, Typeable peerAddr, Eq peerAddr
+       , Eq (LazySTM.TVar m (ConnectionState
+                                peerAddr
+                                (Handle 'InitiatorMode peerAddr ByteString m [resp] Void)
+                                (HandleError 'InitiatorMode UnversionedProtocol)
+                                (UnversionedProtocol, UnversionedProtocolData)
+                                m))
+       -- , Eq (LazySTM.TVar m (ConnectionState_ InitiatorMode          peerAddr m [resp] Void))
+       , Eq (LazySTM.TVar m (ConnectionState_ InitiatorResponderMode peerAddr m [resp] acc))
+       , Serialise req, Show req
+       , Serialise resp, Show resp, Eq resp
+       , Typeable req, Typeable resp
+       )
+    => Snocket m socket peerAddr
+    -> Snocket.AddressFamily peerAddr
+    -> peerAddr
+    -> ClientAndServerData req resp acc
+    -> MultiNodeScript peerAddr req resp acc
+    -> m Property
+multinodeExperiment snocket addrFamily serverAddr serverData (MultiNodeScript script) = do
+  -- Start the main server
+  socket <- Snocket.open snocket addrFamily
+  Snocket.bind   snocket socket serverAddr
+  Snocket.listen snocket socket
+  withBidirectionalConnectionManager "main" snocket socket (Just serverAddr) serverData
+    $ \ connectionManager _ serverAsync -> do
+        link serverAsync
+        loop connectionManager Map.empty Map.empty [] script
+  where
+    loop _ _ _ results [] = foldr (.&&.) (property True) <$> atomically (mapM readTMVar results)
+    loop serverCM nodes clients results (event : script) =
+      case event of
+
+        StartClient delay localAddr clientData -> do
+          threadDelay delay
+          withInitiatorOnlyConnectionManager ("client-" ++ show localAddr) snocket clientData
+            $ \ connectionManager ->
+              loop serverCM nodes (Map.insert localAddr (connectionManager, clientData) clients) results script
+
+        StartServer delay localAddr serverData -> do
+          threadDelay delay
+          fd <- Snocket.open snocket addrFamily
+          Snocket.bind   snocket fd localAddr
+          Snocket.listen snocket fd
+          withBidirectionalConnectionManager ("node-" ++ show localAddr) snocket fd (Just localAddr) serverData
+            $ \ connectionManager _ serverAsync -> do
+              link serverAsync
+              loop serverCM (Map.insert localAddr (connectionManager, serverData) nodes) clients results script
+
+        ClientConnection delay clientAddr -> do
+          threadDelay delay
+          let (cm, clientData) = clients Map.! clientAddr
+          result <- runConnection SingInitiatorMode cm serverAddr serverData clientData
+          loop serverCM nodes clients (result : results) script
+
+        InboundNodeToNode delay nodeAddr -> do
+          threadDelay delay
+          let (cm, nodeData) = nodes Map.! nodeAddr
+          result <- runConnection SingInitiatorResponderMode cm serverAddr serverData nodeData
+          loop serverCM nodes clients (result : results) script
+
+        OutboundNodeToNode delay nodeAddr -> do
+          threadDelay delay
+          let (_, nodeData) = nodes Map.! nodeAddr
+          result <- runConnection SingInitiatorResponderMode serverCM nodeAddr nodeData serverData
+          loop serverCM nodes clients (result : results) script
+
+    runConnection :: forall muxMode handleError a.
+      (HasInitiator muxMode ~ True, Show handleError)
+      => SingMuxMode muxMode
+      -> ConnectionManager muxMode socket peerAddr
+                           (Handle muxMode peerAddr ByteString m [resp] a)
+                           handleError m
+     -> peerAddr
+     -> ClientAndServerData req resp acc
+     -> ClientAndServerData req resp acc
+     -> m (StrictTMVar m Property)
+    runConnection singMuxMode connectionManager serverAddr serverData clientData = do
+      result <- atomically newEmptyTMVar
+      forkIO $ do
+        (rs :: [Either SomeException (Bundle [resp])]) <-
+            replicateM
+              (numberOfRounds clientData)
+              (bracket
+                 (requestOutboundConnection connectionManager serverAddr)
+                 (\_ -> unregisterOutboundConnection connectionManager serverAddr)
+                 (\connHandle -> do
+                  case connHandle of
+                    Connected _ _ (Handle mux muxBundle _ :: Handle muxMode peerAddr ByteString m [resp] a) ->
+                      try @_ @SomeException $ runInitiatorProtocols singMuxMode mux muxBundle
+                    Disconnected _ err ->
+                      throwIO (userError $ "unidirectionalExperiment: " ++ show err))
+              )
+        atomically $ putTMVar result $
+          foldr
+            (\ (r, expected) acc ->
+              case r of
+                Left err -> counterexample (show err) False
+                Right a -> a === expected .&&. acc)
+            (property True)
+            $ zip rs (expectedResult clientData serverData)
+      return result
+
+prop_multinode_Sim :: Snocket.TestAddress Int -> ClientAndServerData Int Int Int -> MultiNodeScript (Snocket.TestAddress Int) Int Int Int -> Property
+prop_multinode_Sim serverAddr serverData script =
+  simulatedPropertyWithTimeout 7200 $ do
+    net <- newNetworkState (singletonScript noAttenuation) 10
+    let snocket = mkSnocket net debugTracer
+    multinodeExperiment snocket Snocket.TestFamily serverAddr serverData script
 
 --
 -- Utils
