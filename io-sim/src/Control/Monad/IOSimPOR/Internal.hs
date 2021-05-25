@@ -1888,7 +1888,7 @@ stepThread thread@Thread { threadId     = tid,
 data StepInfo = StepInfo {
     stepInfoStep       :: Step,
     -- threads that are still concurrent with this step
-    stepInfoConcurrent :: [ThreadId],
+    stepInfoConcurrent :: Set ThreadId,
     -- steps following this one that did not happen after it
     -- (in reverse order)
     stepInfoNonDep     :: [Step],
@@ -1912,23 +1912,24 @@ updateRacesInSimState thread SimState{ threads, races } =
   traceRaces $
   updateRaces (currentStep thread)
               (threadBlocked thread)
-              (Map.keys (Map.filter (not . threadDone) threads)) races
+              (Map.keysSet (Map.filter (not . threadDone) threads))
+              races
 
 -- We take care that steps can only race against threads in their
 -- concurrent set. When this becomes empty, a step can be retired into
 -- the "complete" category, but only if there are some steps racing
 -- with it.
-updateRaces :: Step -> Bool -> [ThreadId] -> Races -> Races
+updateRaces :: Step -> Bool -> Set ThreadId -> Races -> Races
 updateRaces newStep@Step{ stepThreadId = tid, stepEffect = newEffect }
             blocking
             newConcurrent0
             races@Races{ activeRaces } =
   let -- a new step cannot race with any threads that it just woke up
-      newConcurrent = newConcurrent0 List.\\ effectWakeup newEffect
-      new | null newConcurrent = []  -- cannot race with anything
+      newConcurrent = foldr Set.delete newConcurrent0 (effectWakeup newEffect)
+      new | Set.null newConcurrent = []  -- cannot race with anything
           | blocking && onlyReadEffect newEffect
-                               = []  -- no need to defer a blocking transaction
-          | otherwise          =
+                                   = []  -- no need to defer a blocking transaction
+          | otherwise              =
               [StepInfo { stepInfoStep       = newStep,
                           stepInfoConcurrent = newConcurrent,
                           stepInfoNonDep     = [],
@@ -1937,18 +1938,18 @@ updateRaces newStep@Step{ stepThreadId = tid, stepEffect = newEffect }
       updateActive =
         [ -- if this step depends on the previous step, then any threads
           -- that it wakes up become dependent also.
-          let lessConcurrent = concurrent List.\\ effectWakeup newEffect in
+          let lessConcurrent = foldr Set.delete concurrent (effectWakeup newEffect) in
           if tid `elem` concurrent then
             let (nondep', concurrent')
                   | hbfStep (stepThreadId step) (stepStep step) (stepVClock newStep) =
-                    (nondep, List.delete tid lessConcurrent)
+                    (nondep, Set.delete tid lessConcurrent)
                   | otherwise =
                     (newStep : nondep, concurrent)
                 -- we record only the first race with each thread
                 stepRaces' | tid `notElem` map stepThreadId stepRaces &&
                              racingSteps step newStep = newStep : stepRaces
                            | otherwise                = stepRaces
-            in stepInfo { stepInfoConcurrent = Set.elems (effectForks newEffect) ++ concurrent',
+            in stepInfo { stepInfoConcurrent = effectForks newEffect `Set.union` concurrent',
                           stepInfoNonDep     = nondep',
                           stepInfoRaces      = stepRaces'
                         }
@@ -1966,7 +1967,7 @@ updateRaces newStep@Step{ stepThreadId = tid, stepEffect = newEffect }
 
 threadTerminatesRaces :: ThreadId -> Races -> Races
 threadTerminatesRaces tid races@Races{ activeRaces } =
-  let activeRaces' = [ s{stepInfoConcurrent = List.delete tid stepInfoConcurrent}
+  let activeRaces' = [ s{stepInfoConcurrent = Set.delete tid stepInfoConcurrent}
                      | s@StepInfo{ stepInfoConcurrent } <- activeRaces ]
   in normalizeRaces $ races{ activeRaces = activeRaces' }
 
@@ -1988,7 +1989,7 @@ quiescentRacesInSimState simstate@SimState{ races } =
 quiescentRaces :: Races -> Races
 quiescentRaces Races{ activeRaces, completeRaces } =
   Races{ activeRaces = [],
-         completeRaces = [s{stepInfoConcurrent = []} |
+         completeRaces = [s{stepInfoConcurrent = Set.empty} |
                           s <- activeRaces,
                           not (null (stepInfoRaces s))] ++
                          completeRaces }
