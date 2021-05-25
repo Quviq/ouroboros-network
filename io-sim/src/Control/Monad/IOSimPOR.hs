@@ -57,8 +57,16 @@ import           Control.Monad.Class.MonadThrow as MonadThrow
 import           Control.Monad.Class.MonadTime
 
 import           Control.Monad.IOSimPOR.Internal
+import           Control.Monad.IOSimPOR.QuickCheckUtils
 
 import           Test.QuickCheck
+
+
+--import           System.IO
+import           System.IO.Unsafe
+import           System.Timeout
+import           Data.IORef
+import qualified Debug.Trace as Debug
 
 
 selectTraceEvents
@@ -75,17 +83,47 @@ selectTraceEvents fn = go
     go (TraceDeadlock      _   threads) = throw (FailureDeadlock threads)
     go (TraceMainReturn    _ _ _)       = []
 
+
+--selectTraceRaces :: Trace a -> [Control.Monad.IOSimPOR.Internal.ScheduleMod]
 selectTraceRaces = go
   where
-    go (Trace _ _ _ ev trace)        = go trace
-    go (TraceRacesFound races trace) = races ++ go trace
+    go (Trace _ _ _ _ trace)         = go trace
+    go (TraceRacesFound races trace) =
+      --Debug.trace ("Found "++show (length races) ++" races") $
+      races ++ go trace
     go _                             = []
 
+removeTraceRaces :: Trace a -> Trace a
 removeTraceRaces = go
   where
     go (Trace a b c d trace)     = Trace a b c d $ go trace
     go (TraceRacesFound _ trace) = go trace
     go t                         = t
+
+-- Extracting races from a trace.  There is a subtlety in doing so: we
+-- must return a defined list of races even in the case where the
+-- trace is infinite, and there are no races occurring in it! For
+-- example, if the system falls into a deterministic infinite loop,
+-- then there will be no races to find.
+
+-- In reality we only want to extract races from *the part of the
+-- trace used in a test*. We can only observe that by tracking lazy
+-- evaluation: only races that were found in the evaluated prefix of
+-- an infinite trace should contribute to the "races found". Hence we
+-- return a function that returns the races found "so far". This is
+-- unsafe, of course, since that function may return different results
+-- at different times.
+
+detachTraceRaces trace = unsafePerformIO $ do
+  races <- newIORef []
+  let readRaces ()  = concat . reverse . unsafePerformIO $ readIORef races
+      saveRaces r t = unsafePerformIO $ do
+                        modifyIORef races (r:)
+                        return t
+  let go (Trace a b c d trace)     = Trace a b c d $ go trace
+      go (TraceRacesFound r trace) = saveRaces r   $ go trace
+      go t                         = t
+  return (readRaces,go trace)
 
 -- | Select all the traced values matching the expected type. This relies on
 -- the sim's dynamic trace facility.
@@ -170,6 +208,7 @@ traceResult :: Bool -> Trace a -> Either Failure a
 traceResult strict = go
   where
     go (Trace _ _ _ _ t)                = go t
+    go (TraceRacesFound _ t)            = go t
     go (TraceMainReturn _ _ tids@(_:_))
                                | strict = Left (FailureSloppyShutdown tids)
     go (TraceMainReturn _ x _)          = Right x
@@ -197,10 +236,34 @@ exploreSimTrace ::
   forall a test. Testable test =>
     Int -> (forall s. IOSim s a) -> (Trace a -> test) -> Property
 exploreSimTrace n mainAction k =
-  let trace = controlSimTrace ControlDefault mainAction
-      races = selectTraceRaces trace
-  in k (removeTraceRaces trace) .&&.
-     conjoin
-       [ counterexample ("Schedule control: " ++ show r) $
-         k (removeTraceRaces (controlSimTrace (ControlAwait [r]) mainAction))
-       | r <- take n races ]
+  -- ALERT!!! Impure code: readRaces must be called *after* we have
+  -- finished with trace.
+  let (readRaces,trace) = detachTraceRaces $
+                            detectLoopsSimTrace 1000000 $
+                              controlSimTrace ControlDefault mainAction
+  in k trace .&&.
+     let races = take n $ readRaces()
+     in tabulate "Number of races explored" [bucket (length races)] $
+        conjoinPar
+          [ --Debug.trace "New schedule:" $
+            --Debug.trace ("  "++show r) $
+            counterexample ("Schedule control: " ++ show r) $
+            k (removeTraceRaces (detectLoopsSimTrace 1000000 $
+                                   controlSimTrace (ControlAwait [r]) mainAction))
+          | r <- races ]
+  where bucket n | n<10 = show n
+        bucket n | n<50 = let n'=show (n `div` 10) in n'++"0-"++n'++"9"
+        bucket n        = buck 50
+          where buck low | n<2*low = show low++"-"++show (2*low-1)
+                         | otherwise = buck (2*low)
+
+-- Detect loops
+detectLoopsSimTrace :: Int -> Trace a -> Trace a
+detectLoopsSimTrace n trace = go trace
+  where go t =
+          case unsafePerformIO $ timeout n $ return $! t of
+            Nothing                     -> TraceLoop
+            Just (Trace a b c d t')     -> Trace a b c d (go t')
+            Just (TraceRacesFound a t') -> TraceRacesFound a (go t')
+            Just t'                     -> t'
+

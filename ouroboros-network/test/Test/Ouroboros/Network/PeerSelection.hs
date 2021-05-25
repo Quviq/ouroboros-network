@@ -49,6 +49,11 @@ import           Test.Tasty (TestTree, testGroup)
 import           Test.Tasty.QuickCheck (testProperty)
 import           Text.Pretty.Simple
 
+import           System.IO
+import           System.IO.Unsafe(unsafePerformIO)
+import           System.Timeout
+import qualified Debug.Trace as Debug
+
 
 tests :: TestTree
 tests =
@@ -98,14 +103,34 @@ tests =
 -- This uses static targets and root peers.
 --
 -- TODO: Reenable this testcase.
+
+prop_governor_shrinks :: GovernorMockEnvironment -> Property
+prop_governor_shrinks env =
+  --within 10000000 $
+  property $
+  length (show $ shrink env) >= 0
+  
 prop_governor_nolivelock :: GovernorMockEnvironment -> Property
 prop_governor_nolivelock env =
-    within 10_000_000 $
     whenFail (pPrint env) $
-    let trace = takeFirstNHours 24 .
-                selectGovernorEvents .
-                selectPeerSelectionTraceEvents $
-                  runGovernorInMockEnvironment env
+    check_governor_nolivelock env (runGovernorInMockEnvironment env)
+
+-- n is the number of alternative schedules to explore; specify, don't generate.
+prop_explore_governor_nolivelock :: Int -> GovernorMockEnvironment -> Property
+prop_explore_governor_nolivelock n env =
+    whenFail (pPrint env) $
+    --within (10_000_000*(n+1)) $
+    --within 5000000 $
+    exploreGovernorInMockEnvironment n env $ check_governor_nolivelock env
+
+check_governor_nolivelock env trace0 =
+    within 10000000 $
+    property $
+    let trace = selectGovernorEvents $
+                trace1
+        trace1 =
+                takeFirstNHoursPeerSelectionTraceEvents 4 $
+                  trace0
 
      in
 {-
@@ -128,19 +153,25 @@ prop_governor_nolivelock env =
            whenFail (pPrint loop) $
            property False
 
+
        -- Check we don't get too many events within a given time span.
        -- How many events is too many? It scales with the graph size.
        -- The ratio between them is from experimental evidence.
-  .&&. let maxevents = (2+envSize) * 8 -- ratio from experiments
-           timespan  = 5               -- seconds
-           actual    = maxEvents (floor timespan) trace
+  .&&. ( -- tolerate the infinite loop bug we know about
+        -- looping 2 trace .||.
+
+        let maxevents = (2+envSize) * 8 -- ratio from experiments
+            timespan  = 5               -- seconds
+            actual    = maxEvents (floor timespan) trace
         in counterexample ("Too many events in a span of time!\n"
                         ++ "  time span:  " ++ show timespan ++ " seconds\n"
                         ++ "  env size:   " ++ show envSize ++ "\n"
-                        ++ "  num events: " ++ show actual) $
+                        -- ++ "  num events: " ++ show actual
+                        ) $
 
            property (makesAdequateProgress maxevents timespan
-                                           (map fst trace))
+                                           (map fst trace)))
+                                           
   where
     hasOutput :: [(Time, TracePeerSelection PeerAddr)] -> Property
     hasOutput (_:_) = property True
@@ -152,6 +183,9 @@ prop_governor_nolivelock env =
       foldr (<|>)
         (do (pref,loop) <- lookForLoops xs'; return (x:pref,loop))
         [return ([],take i xs) | i <- [1..6], take 100 xs == take 100 (drop i xs)]
+
+    looping n [] = False
+    looping n (x:xs) = take 100 (x:xs) == take 100 (drop (n-1) xs) || looping n xs
 
     envSize         = length g + length (targets env)
                         where PeerGraph g = peerGraph env
@@ -165,6 +199,11 @@ prop_governor_nolivelock env =
     timeSpans n (x@(t,_):xs) =
       let (xs', xs'') = span (\(t',_) -> t' <= addTime (fromIntegral n) t) xs
        in (x:xs') : timeSpans n xs''
+
+-- Consume a list in property
+consumeTrace (x:xs) = do putStr "_"; hFlush stdout; consumeTrace xs
+consumeTrace []     = do putStrLn "done!"; return True
+
 
 -- To check for loops, we need Eq instances, including for
 -- SomeException! Perhaps these should be available more generally.
@@ -214,18 +253,48 @@ makesAdequateProgress n adequate ts =
 --
 prop_governor_gossip_1hr :: GovernorMockEnvironmentWithoutAsyncDemotion -> Property
 prop_governor_gossip_1hr (GovernorMockEnvironmentWAD env@GovernorMockEnvironment{
+                              targets
+                            }) =
+    let trace      = runGovernorInMockEnvironment env {
+                       targets = singletonScript (targets', NoDelay)
+                       }
+    in check_governor_gossip_1hr env trace
+  where
+    -- This test is only about testing gossiping,
+    -- so do not try to establish connections:
+    targets' :: PeerSelectionTargets
+    targets' = (fst (scriptHead targets)) {
+                 targetNumberOfEstablishedPeers = 0,
+                 targetNumberOfActivePeers      = 0
+               }
+
+prop_explore_governor_gossip_1hr :: Int -> GovernorMockEnvironmentWithoutAsyncDemotion -> Property
+prop_explore_governor_gossip_1hr n (GovernorMockEnvironmentWAD env@GovernorMockEnvironment{
+                                     targets
+                                    }) =
+    exploreGovernorInMockEnvironment n env { targets = singletonScript (targets', NoDelay) } $
+    check_governor_gossip_1hr env
+  where
+    -- This test is only about testing gossiping,
+    -- so do not try to establish connections:
+    targets' :: PeerSelectionTargets
+    targets' = (fst (scriptHead targets)) {
+                 targetNumberOfEstablishedPeers = 0,
+                 targetNumberOfActivePeers      = 0
+               }
+
+
+check_governor_gossip_1hr env@GovernorMockEnvironment{
                               peerGraph,
                               localRootPeers,
                               publicRootPeers,
                               targets
-                            }) =
-    let trace      = selectPeerSelectionTraceEvents $
-                       runGovernorInMockEnvironment env {
-                         targets = singletonScript (targets', NoDelay)
-                       }
-        Just found = knownPeersAfter1Hour trace
-        reachable  = firstGossipReachablePeers peerGraph
-                       (LocalRootPeers.keysSet localRootPeers <> publicRootPeers)
+                            }
+                          trace0 =
+     let trace      = selectPeerSelectionTraceEvents trace0
+         Just found = knownPeersAfter1Hour trace
+         reachable  = firstGossipReachablePeers peerGraph
+                        (LocalRootPeers.keysSet localRootPeers <> publicRootPeers)
      in subsetProperty    found reachable
    .&&. bigEnoughProperty found reachable
   where
@@ -277,13 +346,22 @@ prop_governor_gossip_1hr (GovernorMockEnvironmentWAD env@GovernorMockEnvironment
 -- | Check the governor's view of connection status does not lag behind reality
 -- by too much.
 --
-prop_governor_connstatus :: GovernorMockEnvironmentWithoutAsyncDemotion -> Bool
+prop_governor_connstatus :: GovernorMockEnvironmentWithoutAsyncDemotion -> Property
 prop_governor_connstatus (GovernorMockEnvironmentWAD env) =
+  check_governor_connstatus (runGovernorInMockEnvironment env)
+
+prop_explore_governor_connstatus :: Int -> GovernorMockEnvironmentWithoutAsyncDemotion -> Property
+prop_explore_governor_connstatus n (GovernorMockEnvironmentWAD env) =
+  whenFail (pPrint env) $
+  exploreGovernorInMockEnvironment n env check_governor_connstatus
+
+check_governor_connstatus trace0 = 
     let trace = takeFirstNHours 1
-              . selectPeerSelectionTraceEvents $
-                  runGovernorInMockEnvironment env
+              . selectPeerSelectionTraceEvents $ trace0
         --TODO: check any actually get a true status output and try some deliberate bugs
-     in all ok (groupBy ((==) `on` fst) trace)
+     in
+     whenFail (pPrint trace) $
+     all ok (groupBy ((==) `on` fst) trace)
   where
     -- We look at events when the environment's view of the state of all the
     -- peer connections changed, and check that before simulated time advances
@@ -308,6 +386,25 @@ prop_governor_connstatus (GovernorMockEnvironmentWAD env) =
             [ Governor.establishedPeersStatus st
             | (_, GovernorDebug (TraceGovernorState _ _ st)) <- reverse trace ]
 
+{-
+-- Check the governor does not stop doing anything at all.
+-- Actually this is not true... the governor does nothing if there are no targets.
+prop_explore_governor_remains_active :: Int -> GovernorMockEnvironment -> Property
+prop_explore_governor_remains_active n env =
+    whenFail (pPrint env) $
+    --within (10_000_000*(n+1)) $
+    --within 5000000 $
+    exploreGovernorInMockEnvironment n env $ check_governor_remains_active env
+
+check_governor_remains_active env trace0 =
+  let trace = selectGovernorEvents $
+                takeFirstNHoursPeerSelectionTraceEvents 24 $
+                  trace0
+  in maxGap (map fst trace++[Time (60*60*24)]) < 60*60
+
+maxGap ts0 = maximum (zipWith (-) ts (0:ts))
+  where ts = [t | Time t <- ts0]
+-}
 
 --
 -- Utils for properties
@@ -316,6 +413,9 @@ prop_governor_connstatus (GovernorMockEnvironmentWAD env) =
 takeFirstNHours :: DiffTime -> [(Time, a)] -> [(Time, a)]
 takeFirstNHours h = takeWhile (\(t,_) -> t < Time (60*60*h))
 
+takeFirstNHoursPeerSelectionTraceEvents h =
+  selectPeerSelectionTraceEventsUntil tmax
+  where tmax = Time (60*60*h)
 --
 -- Live examples
 --

@@ -19,6 +19,7 @@ module Test.Ouroboros.Network.PeerSelection.MockEnvironment (
     TestTraceEvent(..),
     selectGovernorEvents,
     selectPeerSelectionTraceEvents,
+    selectPeerSelectionTraceEventsUntil,
     firstGossipReachablePeers,
 
     Script,
@@ -70,6 +71,7 @@ import           Test.Ouroboros.Network.ShrinkCarefully
 import           Test.QuickCheck
 import           Test.Tasty (TestTree, localOption, testGroup)
 import           Test.Tasty.QuickCheck (QuickCheckMaxSize (..), testProperty)
+import qualified Debug.Trace as Debug
 
 
 tests :: TestTree
@@ -170,6 +172,7 @@ runGovernorInMockEnvironment :: GovernorMockEnvironment -> Trace Void
 runGovernorInMockEnvironment mockEnv =
     runSimTrace $ governorAction mockEnv
 
+governorAction :: GovernorMockEnvironment -> IOSim s Void
 governorAction mockEnv = do
     actions <- mockPeerSelectionActions tracerMockEnv mockEnv
     policy  <- mockPeerSelectionPolicy                mockEnv
@@ -180,6 +183,11 @@ governorAction mockEnv = do
       actions
       policy
 
+exploreGovernorInMockEnvironment :: Testable test =>
+                                          Int
+                                          -> GovernorMockEnvironment
+                                          -> (Trace Void -> test)
+                                          -> Property
 exploreGovernorInMockEnvironment n mockEnv k =
     exploreSimTrace n (governorAction mockEnv) k
 
@@ -429,6 +437,24 @@ selectPeerSelectionTraceEvents = go
     go (TraceMainException _ e _) = throw e
     go (TraceDeadlock      _   _) = [] -- expected result in many cases
     go (TraceMainReturn    _ _ _) = []
+
+selectPeerSelectionTraceEventsUntil :: Time -> Trace a -> [(Time, TestTraceEvent)]
+selectPeerSelectionTraceEventsUntil tmax = go
+  where
+    go (Trace t _ _ e _)
+     | t > tmax                   = --Debug.trace ("Stopping at "++show t++", after "++show e)
+                                    []
+    go (Trace t _ _ (EventLog e) trace)
+     | Just x <- fromDynamic e    = (t,x) : go trace
+    go (Trace t _ _ (EventTimerExpired tmid) trace)
+                                  = --Debug.trace ("Timer "++show tmid++" expired at "++show t) $
+                                            go trace
+    go (Trace _ _ _ _ trace)      =         go trace
+    go (TraceRacesFound _ trace)  =         go trace
+    go (TraceMainException _ e _) = throw e
+    go (TraceDeadlock      _   _) = [] -- expected result in many cases
+    go (TraceMainReturn    _ _ _) = []
+    go TraceLoop                  = error "Infinite loop"
 
 selectGovernorEvents :: [(Time, TestTraceEvent)]
                      -> [(Time, TracePeerSelection PeerAddr)]
