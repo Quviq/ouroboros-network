@@ -187,6 +187,7 @@ library
   if flag(asserts)
     ghc-options:       -fno-ignore-asserts
 
+
   -- Still in the lib for now as they're used in ouroboros-consensus.
   -- They should be moved to the separate test lib if they're still needed.
   exposed-modules:     Ouroboros.Network.MockChain.Chain
@@ -336,8 +337,10 @@ test-suite test
                        -Wno-unticked-promoted-constructors
                        -fno-ignore-asserts
                        -threaded
+                       +RTS -N -RTS
   if flag(ipv6)
     cpp-options:       -DOUROBOROS_NETWORK_IPV6
+
 
 test-suite cddl
   type:                exitcode-stdio-1.0
