@@ -539,8 +539,8 @@ data Thread s a = Thread {
     threadLabel   :: Maybe ThreadLabel,
     threadNextTId :: !Int,
     threadStep    :: !Int,
-    threadVClock  :: !VectorClock,
-    threadEffect  :: !Effect  -- in the current step
+    threadVClock  :: VectorClock,
+    threadEffect  :: Effect  -- in the current step
   }
   deriving Show
 
@@ -644,7 +644,7 @@ labelledThreads threadMap =
 -- 'selectTraceEventsDynamic' and 'printTraceEventsSay'.
 --
 data Trace a = Trace !Time !ThreadId !(Maybe ThreadLabel) !TraceEvent (Trace a)
-             | TraceRacesFound    ![ScheduleMod]                      (Trace a)
+             | TraceRacesFound    [ScheduleMod]                       (Trace a)
              | TraceMainReturn    !Time a             ![Labelled ThreadId]
              | TraceMainException !Time SomeException ![Labelled ThreadId]
              | TraceDeadlock      !Time               ![Labelled ThreadId]
@@ -699,8 +699,9 @@ data SimState s a = SimState {
        clocks   :: !(Map ClockId UTCTime),
        nextVid  :: !TVarId,     -- ^ next unused 'TVarId'
        nextTmid :: !TimeoutId,  -- ^ next unused 'TimeoutId'
-       -- | previous steps (which we may race with)
-       races    :: !Races,
+       -- | previous steps (which we may race with).
+       -- Note this is *lazy*, so that we don't compute races we will not reverse.
+       races    :: Races,
        -- | control the schedule followed
        control  :: !ScheduleControl
      }
@@ -1826,10 +1827,7 @@ someTvarId :: SomeTVar s -> TVarId
 someTvarId (SomeTVar r) = tvarId r
 
 onlyReadEffect :: Effect -> Bool
-onlyReadEffect Effect{ effectWrites, effectForks, effectLiftST } =
-  Set.null effectWrites &&
-  Set.null effectForks &&
-  not effectLiftST
+onlyReadEffect e@Effect { effectReads } = e == mempty { effectReads }
 
 racingEffects :: Effect -> Effect -> Bool
 racingEffects e e' =
@@ -1913,19 +1911,23 @@ updateRacesInSimState :: Thread s a -> SimState s a -> Races
 updateRacesInSimState thread SimState{ threads, races } =
   traceRaces $
   updateRaces (currentStep thread)
+              (threadBlocked thread)
               (Map.keys (Map.filter (not . threadDone) threads)) races
 
 -- We take care that steps can only race against threads in their
 -- concurrent set. When this becomes empty, a step can be retired into
 -- the "complete" category, but only if there are some steps racing
 -- with it.
-updateRaces :: Step -> [ThreadId] -> Races -> Races
+updateRaces :: Step -> Bool -> [ThreadId] -> Races -> Races
 updateRaces newStep@Step{ stepThreadId = tid, stepEffect = newEffect }
+            blocking
             newConcurrent0
             races@Races{ activeRaces } =
   let -- a new step cannot race with any threads that it just woke up
       newConcurrent = newConcurrent0 List.\\ effectWakeup newEffect
       new | null newConcurrent = []  -- cannot race with anything
+          | blocking && onlyReadEffect newEffect
+                               = []  -- no need to defer a blocking transaction
           | otherwise          =
               [StepInfo { stepInfoStep       = newStep,
                           stepInfoConcurrent = newConcurrent,
@@ -2028,9 +2030,7 @@ stepInfoToScheduleMods
   | step' <- races ]
 
 traceFinalRacesFound :: SimState s a -> Trace a -> Trace a
-traceFinalRacesFound simstate
-  | null scheduleMods = id
-  | otherwise         = TraceRacesFound scheduleMods
+traceFinalRacesFound simstate = TraceRacesFound scheduleMods
   where SimState{ races } =
           quiescentRacesInSimState simstate
         scheduleMods =
