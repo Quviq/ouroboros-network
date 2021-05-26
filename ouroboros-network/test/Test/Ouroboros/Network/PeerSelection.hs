@@ -17,7 +17,7 @@ module Test.Ouroboros.Network.PeerSelection where
 
 import qualified Data.ByteString.Char8 as BS
 import           Data.Function (on)
-import           Data.List (groupBy)
+import           Data.List (groupBy, sort)
 import           Data.Maybe (listToMaybe)
 import           Data.Set (Set)
 import qualified Data.Set as Set
@@ -377,9 +377,9 @@ check_governor_connstatus trace0 =
           (Just _,          Nothing)         -> False
       where
         lastTrueStatus =
-          listToMaybe
+          fmap snd . listToMaybe . reverse . sort $
             [ status
-            | (_, MockEnvEvent (TraceEnvPeersStatus status)) <- reverse trace ]
+            | (_, MockEnvEvent (TraceEnvPeersStatus status)) <- trace ]
 
         lastTestStatus =
           listToMaybe
