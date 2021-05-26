@@ -1,11 +1,13 @@
 {-# LANGUAGE ConstraintKinds     #-}
 {-# LANGUAGE CPP                 #-}
 {-# LANGUAGE DataKinds           #-}
+{-# LANGUAGE DeriveFunctor       #-}
 {-# LANGUAGE GADTs               #-}
 {-# LANGUAGE FlexibleContexts    #-}
 {-# LANGUAGE KindSignatures      #-}
 {-# LANGUAGE NamedFieldPuns      #-}
 {-# LANGUAGE RankNTypes          #-}
+{-# LANGUAGE RecordWildCards     #-}
 {-# LANGUAGE ScopedTypeVariables #-}
 {-# LANGUAGE TupleSections       #-}
 {-# LANGUAGE TypeApplications    #-}
@@ -35,7 +37,7 @@ import           Control.Tracer (Tracer (..), contramap, nullTracer, traceWith)
 import           Codec.Serialise.Class (Serialise)
 import           Data.ByteString.Lazy (ByteString)
 import           Data.Functor (($>), (<&>))
-import           Data.List (mapAccumL, intercalate)
+import           Data.List (mapAccumL, intercalate, (\\))
 import           Data.List.NonEmpty (NonEmpty (..))
 import qualified Data.Map as Map
 import           Data.Maybe (fromMaybe)
@@ -78,6 +80,7 @@ import           Ouroboros.Network.Server2 (ServerArguments (..))
 import qualified Ouroboros.Network.Server2 as Server
 import           Ouroboros.Network.Snocket (Snocket, socketSnocket)
 import qualified Ouroboros.Network.Snocket as Snocket
+import           Ouroboros.Network.Testing.Utils (genDelayWithPrecision)
 
 import           Test.Ouroboros.Network.Orphans ()  -- ShowProxy ReqResp instance
 import           Test.Ouroboros.Network.IOSim (NonFailingBearerInfoScript(..), toBearerInfo)
@@ -1032,18 +1035,87 @@ prop_bidirectional_IO data0 data1 =
               data0
               data1
 
-data ConnectionEvent peerAddr req resp acc
+data ConnectionEvent req resp acc peerAddr
   = StartClient DiffTime peerAddr (ClientAndServerData req resp acc)
   | StartServer DiffTime peerAddr (ClientAndServerData req resp acc)
   | ClientConnection   DiffTime peerAddr
   | InboundNodeToNode  DiffTime peerAddr
   | OutboundNodeToNode DiffTime peerAddr
+  deriving (Show, Functor)
 
-newtype MultiNodeScript peerAddr req resp acc = MultiNodeScript [ConnectionEvent peerAddr req resp acc]
+newtype MultiNodeScript req resp acc peerAddr = MultiNodeScript [ConnectionEvent req resp acc peerAddr]
+  deriving (Show, Functor)
 
-instance (Arbitrary peerAddr, Arbitrary req, Arbitrary resp, Arbitrary acc) =>
-         Arbitrary (MultiNodeScript peerAddr req resp acc) where
-  arbitrary = return $ MultiNodeScript []
+data ScriptState peerAddr = ScriptState { startedClients      :: [peerAddr]
+                                        , startedServers      :: [peerAddr]
+                                        , clientConnections   :: [peerAddr]
+                                        , inboundConnections  :: [peerAddr]
+                                        , outboundConnections :: [peerAddr] }
+
+instance (Arbitrary peerAddr, Arbitrary req, Arbitrary resp, Arbitrary acc,
+          Function acc, CoArbitrary acc,
+          Function req, CoArbitrary req, Eq peerAddr) =>
+         Arbitrary (MultiNodeScript req resp acc peerAddr) where
+  arbitrary = do
+      NonNegative len <- scale (`div` 2) arbitrary
+      MultiNodeScript <$> go (ScriptState [] [] [] [] []) (len :: Integer)
+    where
+      delay = genDelayWithPrecision 2
+      go _ 0 = pure []
+      go s@ScriptState{..} n = do
+        event <- frequency $
+                    [ (1, StartClient        <$> delay <*> newClient <*> arbitrary)
+                    , (1, StartServer        <$> delay <*> newServer <*> arbitrary) ] ++
+                    [ (4, ClientConnection   <$> delay <*> elements possibleClientConnections)   | not $ null possibleClientConnections] ++
+                    [ (4, InboundNodeToNode  <$> delay <*> elements possibleInboundConnections)  | not $ null possibleInboundConnections] ++
+                    [ (4, OutboundNodeToNode <$> delay <*> elements possibleOutboundConnections) | not $ null possibleOutboundConnections]
+        let next (StartClient        _ a _) = s{ startedClients      = a : startedClients }
+            next (StartServer        _ a _) = s{ startedServers      = a : startedServers }
+            next (ClientConnection   _ a)   = s{ clientConnections   = a : clientConnections }
+            next (InboundNodeToNode  _ a)   = s{ inboundConnections  = a : inboundConnections }
+            next (OutboundNodeToNode _ a)   = s{ outboundConnections = a : outboundConnections }
+        (event :) <$> go (next event) (n - 1)
+        where
+          possibleClientConnections   = startedClients \\ clientConnections
+          possibleInboundConnections  = startedServers \\ inboundConnections
+          possibleOutboundConnections = startedServers \\ outboundConnections
+          newClient = arbitrary `suchThat` (`notElem` startedClients)
+          newServer = arbitrary `suchThat` (`notElem` startedServers)
+
+  shrink (MultiNodeScript events) = MultiNodeScript . makeValid <$> shrinkList shrinkEvent events
+    where
+      makeValid = go (ScriptState [] [] [] [] [])
+        where
+          go s [] = []
+          go s (e : es)
+            | pre e s   = e : go (next e s) es
+            | otherwise = go s es
+
+      pre e ScriptState{..} =
+        case e of
+          StartClient        _ a _ -> notElem a startedClients
+          StartServer        _ a _ -> notElem a startedServers
+          ClientConnection   _ a   -> elem a startedClients && notElem a clientConnections
+          InboundNodeToNode  _ a   -> elem a startedServers && notElem a inboundConnections
+          OutboundNodeToNode _ a   -> elem a startedServers && notElem a outboundConnections
+
+      next e s@ScriptState{..} =
+        case e of
+          StartClient        _ a _ -> s{ startedClients      = a : startedClients }
+          StartServer        _ a _ -> s{ startedServers      = a : startedServers }
+          ClientConnection   _ a   -> s{ clientConnections   = a : clientConnections }
+          InboundNodeToNode  _ a   -> s{ inboundConnections  = a : inboundConnections }
+          OutboundNodeToNode _ a   -> s{ outboundConnections = a : outboundConnections }
+
+      shrinkEvent (StartServer t a p) = StartServer t a <$> shrink p
+      shrinkEvent (StartClient t a p) = StartClient t a <$> shrink p
+      shrinkEvent _ = []
+
+newtype TestAddr = TestAddr { unTestAddr :: Snocket.TestAddress Int }
+  deriving (Show, Eq, Ord)
+
+instance Arbitrary TestAddr where
+  arbitrary = TestAddr . Snocket.TestAddress <$> choose (1, 100)
 
 -- | Run a central server that talks to any number of clients and other nodes.
 multinodeExperiment
@@ -1069,7 +1141,7 @@ multinodeExperiment
     -> Snocket.AddressFamily peerAddr
     -> peerAddr
     -> ClientAndServerData req resp acc
-    -> MultiNodeScript peerAddr req resp acc
+    -> MultiNodeScript req resp acc peerAddr
     -> m Property
 multinodeExperiment snocket addrFamily serverAddr serverData (MultiNodeScript script) = do
   -- Start the main server
@@ -1131,6 +1203,7 @@ multinodeExperiment snocket addrFamily serverAddr serverData (MultiNodeScript sc
      -> m (StrictTMVar m Property)
     runConnection singMuxMode connectionManager serverAddr serverData clientData = do
       result <- atomically newEmptyTMVar
+      now <- getCurrentTime
       forkIO $ do
         (rs :: [Either SomeException (Bundle [resp])]) <-
             replicateM
@@ -1145,7 +1218,7 @@ multinodeExperiment snocket addrFamily serverAddr serverData (MultiNodeScript sc
                     Disconnected _ err ->
                       throwIO (userError $ "unidirectionalExperiment: " ++ show err))
               )
-        atomically $ putTMVar result $
+        atomically $ putTMVar result $ counterexample ("Connection at " ++ show now) $
           foldr
             (\ (r, expected) acc ->
               case r of
@@ -1155,12 +1228,39 @@ multinodeExperiment snocket addrFamily serverAddr serverData (MultiNodeScript sc
             $ zip rs (expectedResult clientData serverData)
       return result
 
-prop_multinode_Sim :: Snocket.TestAddress Int -> ClientAndServerData Int Int Int -> MultiNodeScript (Snocket.TestAddress Int) Int Int Int -> Property
-prop_multinode_Sim serverAddr serverData script =
+prop_multinode_Sim :: ClientAndServerData Int Int Int -> MultiNodeScript Int Int Int TestAddr -> Property
+prop_multinode_Sim serverData script' =
   simulatedPropertyWithTimeout 7200 $ do
     net <- newNetworkState (singletonScript noAttenuation) 10
     let snocket = mkSnocket net debugTracer
-    multinodeExperiment snocket Snocket.TestFamily serverAddr serverData script
+        script  = unTestAddr <$> script'
+    counterexample (ppScript script) <$>
+      multinodeExperiment snocket Snocket.TestFamily (Snocket.TestAddress 0) serverData script
+
+ppScript :: (Show peerAddr, Show req, Show resp, Show acc) => MultiNodeScript peerAddr req resp acc -> String
+ppScript (MultiNodeScript script) = intercalate "\n" $ go 0 script
+  where
+    delay (StartServer        d _ _) = d
+    delay (StartClient        d _ _) = d
+    delay (ClientConnection   d _)   = d
+    delay (InboundNodeToNode  d _)   = d
+    delay (OutboundNodeToNode d _)   = d
+
+    ppEvent (StartServer        _ a p) = "Start server " ++ show a ++ " with " ++ ppData p
+    ppEvent (StartClient        _ a p) = "Start client " ++ show a ++ " with " ++ ppData p
+    ppEvent (ClientConnection   _ a)   = "Connection from client " ++ show a
+    ppEvent (InboundNodeToNode  _ a)   = "Connection from server " ++ show a
+    ppEvent (OutboundNodeToNode _ a)   = "Connecting to server " ++ show a
+
+    ppData ClientAndServerData{responderAccumulatorFn = fn, accumulatorInit = i,
+                               hotInitiatorRequests = hot,
+                               warmInitiatorRequests = warm,
+                               establishedInitiatorRequests = est} =
+      concat ["fn:", show fn, "/", show i, " hot:", show hot, " warm:", show warm, " est:", show est]
+
+    go _ [] = []
+    go t (e : es) = printf "%5s: %s" (show t') (ppEvent e) : go t' es
+      where t' = t + delay e
 
 --
 -- Utils
@@ -1209,7 +1309,7 @@ withLock v m =
 
 simulatedPropertyWithTimeout :: DiffTime -> (forall s. IOSim s Property) -> Property
 simulatedPropertyWithTimeout t test =
-  counterexample ("\nTrace:\n" ++ ppTrace tr) $
+  -- counterexample ("\nTrace:\n" ++ ppTrace tr) $
   case traceResult False tr of
     Left failure ->
       counterexample ("Failure:\n" ++ displayException failure) False
