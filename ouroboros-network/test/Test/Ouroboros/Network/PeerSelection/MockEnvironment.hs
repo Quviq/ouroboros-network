@@ -49,6 +49,8 @@ import           Control.Monad.Class.MonadAsync
 import           Control.Monad.Class.MonadSTM
 import           Control.Monad.Class.MonadTime
 import           Control.Monad.Class.MonadThrow
+import           Control.Monad.Class.MonadFork
+import           Control.Monad.Class.MonadTest
 import qualified Control.Monad.Fail as Fail
 import           Control.Tracer (Tracer (..), contramap, traceWith)
 
@@ -176,12 +178,16 @@ governorAction :: GovernorMockEnvironment -> IOSim s Void
 governorAction mockEnv = do
     actions <- mockPeerSelectionActions tracerMockEnv mockEnv
     policy  <- mockPeerSelectionPolicy                mockEnv
-    peerSelectionGovernor
-      tracerTracePeerSelection
-      tracerDebugPeerSelection
-      tracerTracePeerSelectionCounters
-      actions
-      policy
+    exploreRaces      -- explore races within the governor
+    forkIO $ do       -- races with the governor should be explored
+      peerSelectionGovernor
+        tracerTracePeerSelection
+        tracerDebugPeerSelection
+        tracerTracePeerSelectionCounters
+        actions
+        policy
+      atomically retry
+    atomically retry  -- block to allow the governor to run
 
 exploreGovernorInMockEnvironment :: Testable test =>
                                           Int

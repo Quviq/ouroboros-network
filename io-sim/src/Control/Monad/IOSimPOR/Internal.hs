@@ -91,6 +91,7 @@ import qualified Control.Monad.Class.MonadSTM as MonadSTM
 import           Control.Monad.Class.MonadThrow as MonadThrow
 import           Control.Monad.Class.MonadTime
 import           Control.Monad.Class.MonadTimer
+import           Control.Monad.Class.MonadTest
 
 import qualified Debug.Trace as Debug
 
@@ -140,6 +141,8 @@ data SimA s a where
   ThrowTo      :: SomeException -> ThreadId -> SimA s a -> SimA s a
   SetMaskState :: MaskingState  -> IOSim s a -> (a -> SimA s b) -> SimA s b
   GetMaskState :: (MaskingState -> SimA s b) -> SimA s b
+
+  ExploreRaces :: SimA s b -> SimA s b
 
 
 newtype STM s a = STM { unSTM :: forall r. (a -> StmA s r) -> StmA s r }
@@ -337,6 +340,9 @@ instance MonadFork (IOSim s) where
   forkIO task        = IOSim $ \k -> Fork task k
   forkIOWithUnmask f = forkIO (f unblock)
   throwTo tid e      = IOSim $ \k -> ThrowTo (toException e) tid (k ())
+
+instance MonadTest (IOSim s) where
+  exploreRaces       = IOSim $ \k -> ExploreRaces (k ())
 
 instance MonadSay (STMSim s) where
   say msg = STM $ \k -> SayStm msg (k ())
@@ -540,7 +546,8 @@ data Thread s a = Thread {
     threadNextTId :: !Int,
     threadStep    :: !Int,
     threadVClock  :: VectorClock,
-    threadEffect  :: Effect  -- in the current step
+    threadEffect  :: Effect,  -- in the current step
+    threadRacy    :: !Bool
   }
   deriving Show
 
@@ -583,11 +590,17 @@ data ControlStackDash =
   | CatchFrame' ControlStackDash
   deriving Show
 
-newtype ThreadId    = ThreadId  [Int] deriving (Eq, Ord, Show)
+data    ThreadId    = ThreadId  [Int]
+                    | TestThreadId [Int]    -- test threads have higher priority
+  deriving (Eq, Ord, Show)
+  
 newtype TVarId      = TVarId    Int   deriving (Eq, Ord, Enum, Show)
 newtype TimeoutId   = TimeoutId Int   deriving (Eq, Ord, Enum, Show)
 newtype ClockId     = ClockId   [Int] deriving (Eq, Ord, Show)
 newtype VectorClock = VectorClock (Map ThreadId Int) deriving Show
+
+isTestThreadId (TestThreadId _) = True
+isTestThreadId _                = False
 
 unTimeoutId :: TimeoutId -> Int
 unTimeoutId (TimeoutId a) = a
@@ -972,7 +985,11 @@ schedule thread@Thread{
 
     Fork a k -> do
       let nextTId  = threadNextTId thread
-          tid'     = let ThreadId is = tid in ThreadId $ is++[nextTId]
+          tid'     = case tid of
+                       ThreadId is     -> ThreadId $ is++[nextTId]
+                       TestThreadId is
+                         | threadRacy thread -> ThreadId     $ is++[nextTId]
+                         | otherwise         -> TestThreadId $ is++[nextTId]
           thread'  = thread { threadControl = ThreadControl (k tid') ctl,
                               threadNextTId = nextTId + 1,
                               threadEffect  = effect <> forkEffect tid' }
@@ -989,9 +1006,10 @@ schedule thread@Thread{
                             , threadStep    = 0
                             , threadVClock  = insertVClock tid' 0 vClock
                             , threadEffect  = mempty
+                            , threadRacy    = threadRacy thread
                             }
           threads' = Map.insert tid' thread'' threads
-      -- A newly forked thread will have a higher priority, so we deschedule this one.
+      -- A newly forked thread may have a higher priority, so we deschedule this one.
       trace <- deschedule Yield thread'
                  simstate { runqueue = List.insertBy (comparing Down) tid' runqueue
                           , threads  = threads' }
@@ -1059,6 +1077,11 @@ schedule thread@Thread{
       let thread'  = thread { threadControl = ThreadControl k ctl }
           threads' = Map.adjust (\t -> t { threadLabel = Just l }) tid' threads
       schedule thread' simstate { threads = threads' }
+
+    ExploreRaces k -> do
+      let thread'  = thread { threadControl = ThreadControl k ctl
+                            , threadRacy    = True }
+      schedule thread' simstate
 
     GetMaskState k -> do
       let thread' = thread { threadControl = ThreadControl (k maskst) ctl }
@@ -1422,7 +1445,7 @@ controlSimTraceST control mainAction =
   where
     mainThread =
       Thread {
-        threadId      = ThreadId [],
+        threadId      = TestThreadId [],
         threadControl = ThreadControl (runIOSim mainAction) MainFrame,
         threadBlocked = False,
         threadDone    = False,
@@ -1432,8 +1455,9 @@ controlSimTraceST control mainAction =
         threadLabel   = Just "main",
         threadNextTId = 1,
         threadStep    = 0,
-        threadVClock  = insertVClock (ThreadId []) 0 bottomVClock,
-        threadEffect  = mempty
+        threadVClock  = insertVClock (TestThreadId []) 0 bottomVClock,
+        threadEffect  = mempty,
+        threadRacy    = False
       }
 
 
@@ -1925,16 +1949,18 @@ updateRaces newStep@Step{ stepThreadId = tid, stepEffect = newEffect }
             newConcurrent0
             races@Races{ activeRaces } =
   let -- a new step cannot race with any threads that it just woke up
-      newConcurrent = foldr Set.delete newConcurrent0 (effectWakeup newEffect)
-      new | Set.null newConcurrent = []  -- cannot race with anything
-          | blocking && onlyReadEffect newEffect
-                                   = []  -- no need to defer a blocking transaction
+      newConcurrent = Set.filter (not . isTestThreadId) $
+                        foldr Set.delete newConcurrent0 (effectWakeup newEffect)
+      new | isTestThreadId tid     = []  -- test threads do not race
+          | Set.null newConcurrent = []  -- cannot race with anything
+          | justBlocking           = []  -- no need to defer a blocking transaction
           | otherwise              =
               [StepInfo { stepInfoStep       = newStep,
                           stepInfoConcurrent = newConcurrent,
                           stepInfoNonDep     = [],
                           stepInfoRaces      = []
                         }]
+      justBlocking = blocking && onlyReadEffect newEffect
       updateActive =
         [ -- if this step depends on the previous step, then any threads
           -- that it wakes up become dependent also.
@@ -1974,7 +2000,9 @@ threadTerminatesRaces tid races@Races{ activeRaces } =
 normalizeRaces :: Races -> Races
 normalizeRaces Races{ activeRaces, completeRaces } =
   let activeRaces' = filter (not . null. stepInfoConcurrent) activeRaces
-      completeRaces' = filter (null . stepInfoConcurrent) activeRaces ++ completeRaces
+      completeRaces' = filter (not . null. stepInfoRaces)
+                         (filter (null . stepInfoConcurrent) activeRaces)
+                    ++ completeRaces
   in Races{ activeRaces = activeRaces', completeRaces = completeRaces' }
   
 -- We assume that steps do not race with later steps after a quiescent
