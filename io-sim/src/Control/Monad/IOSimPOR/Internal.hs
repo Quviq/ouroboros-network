@@ -1110,7 +1110,8 @@ schedule thread@Thread{
                                 threadEffect  = effect <> throwToEffect tid',
                                 threadVClock  = vClock `lubVClock` vClockTgt }
           (vClockTgt, 
-           willBlock) = (threadVClock t, not (threadInterruptible t))
+           willBlock) = (threadVClock t,
+                         not (threadInterruptible t || threadDone t))
             where Just t = Map.lookup tid' threads
             
       if willBlock
