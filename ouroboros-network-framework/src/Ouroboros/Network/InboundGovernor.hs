@@ -34,6 +34,7 @@ import           Control.Exception (SomeAsyncException (..), assert)
 import           Control.Applicative (Alternative (..), (<|>))
 import           Control.Monad (foldM)
 import           Control.Monad.Class.MonadAsync
+import           Control.Monad.Class.MonadFork
 import qualified Control.Monad.Class.MonadSTM as LazySTM
 import           Control.Monad.Class.MonadSTM.Strict
 import           Control.Monad.Class.MonadThrow hiding (handle)
@@ -99,6 +100,7 @@ inboundGovernor tracer serverControlChannel protocolIdleTimeout
             igsConnections   = Map.empty,
             igsObservableVar = observableStateVar
           }
+    myThreadId >>= (`labelThread` "inboundGovernor")
     inboundGovernorLoop state
   where
     -- The inbound protocol governor recursive loop.  The 'igsConnections' is
@@ -339,7 +341,7 @@ inboundGovernor tracer serverControlChannel protocolIdleTimeout
               -- @'InOutboundState' 'Unidirectional'@,
               -- @'InTerminatingState'@,
               -- @'InTermiantedState'@.
-              let state' = unregisterConnection connId state 
+              let state' = unregisterConnection connId state
               inboundGovernorLoop state'
 
             OperationSuccess transition ->

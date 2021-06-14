@@ -24,6 +24,7 @@ import           Control.Monad (when)
 import qualified Control.Monad.Class.MonadSTM as LazySTM
 import           Control.Monad.Class.MonadSTM.Strict
 import           Control.Monad.Class.MonadTime
+import           Control.Monad.Class.MonadSay
 import           Control.Monad.Class.MonadTimer
 import           Control.Monad.Class.MonadThrow
 import           Control.Tracer (Tracer, traceWith)
@@ -260,6 +261,7 @@ newConnectedAttenuatedChannelPair tr tr' attenuation attenuation' = do
 
 attenuationChannelAsMuxBearer :: forall m.
                                  ( MonadThrow         m
+                                 , MonadSay m
                                  , MonadMonotonicTime m
                                  )
                               => SDUSize
@@ -292,6 +294,7 @@ attenuationChannelAsMuxBearer sduSize sduTimeout muxTracer chan =
               traceWith muxTracer $ MuxTraceRecvHeaderEnd header
               ts <- getMonotonicTime
               traceWith muxTracer $ MuxTraceRecvDeltaQObservation header ts
+              say $ "Got " ++ show (BL.length payload)
               return (muxsdu {msBlob = payload}, ts)
 
     writeMux :: TimeoutFn m -> MuxSDU -> m Time

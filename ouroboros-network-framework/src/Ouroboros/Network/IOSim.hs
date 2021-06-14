@@ -39,6 +39,7 @@ import           Control.Monad (when)
 import qualified Control.Monad.Class.MonadSTM as LazySTM
 import           Control.Monad.Class.MonadSTM.Strict
 import           Control.Monad.Class.MonadTime
+import           Control.Monad.Class.MonadSay
 import           Control.Monad.Class.MonadTimer
 import           Control.Monad.Class.MonadThrow
 import           Control.Tracer (Tracer, contramap, traceWith)
@@ -249,7 +250,7 @@ data FD_ m addr
         -- ^ communication channel @local → remote@
         !SDUSize
         -- ^ SDUSize for mux bearer
-    
+
     -- | 'FD_' of a closed file descriptor; we keep 'ConnectionId' just for
     -- tracing purposes.
     --
@@ -302,6 +303,7 @@ mkSnocket :: forall m addr.
              , MonadMask  m
              , MonadTime  m
              , MonadTimer m
+             , MonadSay m
              , Ord addr
              )
           => NetworkState m (TestAddress addr)
@@ -438,7 +440,7 @@ mkSnocket state tr = Snocket { getLocalAddr
             case res of
               Left e    -> traceWith tr (STConnectError fd remoteAddress e)
                         >> throwIO e
-              Right fd' -> traceWith tr (STConnected fd') 
+              Right fd' -> traceWith tr (STConnected fd')
 
           FDConnected {} ->
             throwIO connectedIOError
@@ -526,7 +528,7 @@ mkSnocket state tr = Snocket { getLocalAddr
             queue <- newTBQueue bound
             writeTVar fdVar (FDListening addr queue)
             modifyTVar (nsListeningFDs state) (Map.insert addr fd)
-            
+
           FDConnected {} ->
             throwSTM invalidError
           FDListening {} ->
