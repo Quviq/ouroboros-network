@@ -43,7 +43,8 @@ module Control.Monad.IOSimPOR.Internal (
   liftST,
   execReadTVar,
   controlSimTraceST,
-  ScheduleControl(..)
+  ScheduleControl(..),
+  ScheduleMod(..)
   ) where
 
 import           Prelude hiding (read)
@@ -63,6 +64,7 @@ import           Data.Time (UTCTime (..), fromGregorian)
 import           Data.Typeable (Typeable)
 import           Quiet (Quiet (..))
 import           GHC.Generics (Generic)
+import           GHC.Show
 
 import           Control.Applicative (Alternative (..), liftA2)
 import           Control.Exception (ErrorCall (..), assert,
@@ -657,7 +659,7 @@ labelledThreads threadMap =
 -- 'selectTraceEventsDynamic' and 'printTraceEventsSay'.
 --
 data Trace a = Trace !Time !ThreadId !(Maybe ThreadLabel) !TraceEvent (Trace a)
-             | TraceRacesFound    [ScheduleMod]                       (Trace a)
+             | TraceRacesFound    [ScheduleControl]                   (Trace a)
              | TraceMainReturn    !Time a             ![Labelled ThreadId]
              | TraceMainException !Time SomeException ![Labelled ThreadId]
              | TraceDeadlock      !Time               ![Labelled ThreadId]
@@ -715,8 +717,10 @@ data SimState s a = SimState {
        -- | previous steps (which we may race with).
        -- Note this is *lazy*, so that we don't compute races we will not reverse.
        races    :: Races,
-       -- | control the schedule followed
-       control  :: !ScheduleControl
+       -- | control the schedule followed, and initial value
+       control  :: !ScheduleControl,
+       control0 :: !ScheduleControl
+
      }
 
 initialState :: SimState s a
@@ -730,7 +734,8 @@ initialState =
       nextVid  = TVarId 0,
       nextTmid = TimeoutId 0,
       races    = noRaces,
-      control  = ControlDefault
+      control  = ControlDefault,
+      control0 = ControlDefault
     }
   where
     epoch1970 = UTCTime (fromGregorian 1970 1 1) 0
@@ -1307,8 +1312,8 @@ reschedule simstate@SimState{ runqueue = [], threads, timers, curTime = time, ra
     assert (invariant Nothing simstate) $
 
     -- time is moving on
-    --Debug.trace ("Rescheduling at "++show time++
-      --           ", races: "++show(length(activeRaces races), length(completeRaces races))) $
+    --Debug.trace ("Rescheduling at "++show time++", "++
+      --show (length (concatMap stepInfoRaces (activeRaces races++completeRaces races)))++" races") $
 
     -- important to get all events that expire at this time
     case removeMinimums timers of
@@ -1442,7 +1447,7 @@ runSimTraceST mainAction = controlSimTraceST ControlDefault mainAction
 
 controlSimTraceST :: ScheduleControl -> IOSim s a -> ST s (Trace a)
 controlSimTraceST control mainAction =
-  schedule mainThread initialState{ control = control }
+  schedule mainThread initialState{ control = control, control0 = control }
   where
     mainThread =
       Thread {
@@ -1912,6 +1917,8 @@ stepThread thread@Thread { threadId     = tid,
 -- As we run a simulation, we collect info about each previous step
 data StepInfo = StepInfo {
     stepInfoStep       :: Step,
+    -- Control information when we reached this step
+    stepInfoControl    :: ScheduleControl,
     -- threads that are still concurrent with this step
     stepInfoConcurrent :: Set ThreadId,
     -- steps following this one that did not happen after it
@@ -1933,10 +1940,11 @@ noRaces :: Races
 noRaces = Races [] []
 
 updateRacesInSimState :: Thread s a -> SimState s a -> Races
-updateRacesInSimState thread SimState{ threads, races } =
+updateRacesInSimState thread SimState{ control, threads, races } =
   traceRaces $
   updateRaces (currentStep thread)
               (threadBlocked thread)
+              control
               (Map.keysSet (Map.filter (not . threadDone) threads))
               races
 
@@ -1944,9 +1952,10 @@ updateRacesInSimState thread SimState{ threads, races } =
 -- concurrent set. When this becomes empty, a step can be retired into
 -- the "complete" category, but only if there are some steps racing
 -- with it.
-updateRaces :: Step -> Bool -> Set ThreadId -> Races -> Races
+updateRaces :: Step -> Bool -> ScheduleControl -> Set ThreadId -> Races -> Races
 updateRaces newStep@Step{ stepThreadId = tid, stepEffect = newEffect }
             blocking
+            control
             newConcurrent0
             races@Races{ activeRaces } =
   let -- a new step cannot race with any threads that it just woke up
@@ -1957,6 +1966,7 @@ updateRaces newStep@Step{ stepThreadId = tid, stepEffect = newEffect }
           | justBlocking           = []  -- no need to defer a blocking transaction
           | otherwise              =
               [StepInfo { stepInfoStep       = newStep,
+                          stepInfoControl    = control,
                           stepInfoConcurrent = newConcurrent,
                           stepInfoNonDep     = [],
                           stepInfoRaces      = []
@@ -1972,8 +1982,12 @@ updateRaces newStep@Step{ stepThreadId = tid, stepEffect = newEffect }
                     (nondep, Set.delete tid lessConcurrent)
                   | otherwise =
                     (newStep : nondep, concurrent)
-                -- we record only the first race with each thread
-                stepRaces' | tid `notElem` map stepThreadId stepRaces &&
+                -- Here we record discovered races.
+                -- We only record a race if we are following the default schedule,
+                -- to avoid finding the same race in different parts of the search space.
+                -- We record only the first race with each thread
+                stepRaces' | control == ControlDefault &&
+                             tid `notElem` map stepThreadId stepRaces &&
                              racingSteps step newStep = newStep : stepRaces
                            | otherwise                = stepRaces
             in stepInfo { stepInfoConcurrent = effectForks newEffect `Set.union` concurrent',
@@ -2031,10 +2045,24 @@ traceRaces r@Races{activeRaces,completeRaces} =
 -- Schedule modifications
 
 data ScheduleMod = ScheduleMod{
-    scheduleModTarget    :: StepId,
-    scheduleModInsertion :: [StepId]
+    scheduleModTarget    :: StepId,   -- when we reach this step
+    scheduleModControl   :: ScheduleControl,
+                                      -- which happens with this control
+    scheduleModInsertion :: [StepId]  -- we should instead perform this sequence
+                                      -- this *includes* the target step,
+                                      -- not necessarily as the last step.
   }
-  deriving Show
+  deriving (Eq, Ord)
+
+instance Show ScheduleMod where
+  showsPrec d (ScheduleMod tgt ctrl insertion) =
+    showParen (d>10) $
+      showString "ScheduleMod " .
+      showsPrec 11 tgt .
+      showSpace .
+      showsPrec 11 ctrl .
+      showSpace .
+      showsPrec 11 insertion
 
 type StepId = (ThreadId,Int)
 
@@ -2046,36 +2074,36 @@ threadStepId Thread{ threadId, threadStep } = (threadId, threadStep)
 
 stepInfoToScheduleMods :: StepInfo -> [ScheduleMod]
 stepInfoToScheduleMods
-  StepInfo{ stepInfoStep   = step,
-            stepInfoNonDep = nondep,
-            stepInfoRaces  = races
+  StepInfo{ stepInfoStep    = step,
+            stepInfoControl = control,
+            stepInfoNonDep  = nondep,
+            stepInfoRaces   = races
           } =
   -- It is actually possible for a later step that races with an earlier one
   -- not to *depend* on it in a happens-before sense. But we don't want to try
   -- to follow any steps *after* the later one.
   [ ScheduleMod (stepStepId step)
+                control
                 (takeWhile (/=stepStepId step')
                    (map stepStepId (reverse nondep))
-                   ++ [stepStepId step'])
+                   ++ [stepStepId step', stepStepId step])
   | step' <- races ]
 
 traceFinalRacesFound :: SimState s a -> Trace a -> Trace a
-traceFinalRacesFound simstate = TraceRacesFound scheduleMods
+traceFinalRacesFound simstate@SimState{ control0 = control } =
+  TraceRacesFound [extendScheduleControl control m | m <- scheduleMods]
   where SimState{ races } =
           quiescentRacesInSimState simstate
         scheduleMods =
           concatMap stepInfoToScheduleMods $ completeRaces races
 
-forgetCompletedRaces :: SimState s a -> SimState s a
-forgetCompletedRaces simstate@SimState{ races } =
-  simstate{ races = races{ completeRaces = [] } }
 
 -- Schedule control
 
 data ScheduleControl = ControlDefault
                      | ControlAwait [ScheduleMod]
                      | ControlFollow [StepId] [ScheduleMod]
-  deriving Show
+  deriving (Eq, Ord, Show)
 
 controlTargets :: StepId -> ScheduleControl -> Bool
 controlTargets stepId
@@ -2116,6 +2144,35 @@ followControl (ControlAwait
                  (ScheduleMod{scheduleModTarget,
                               scheduleModInsertion}:
                   mods)) =
-  ControlFollow (scheduleModInsertion ++ [scheduleModTarget])
-                mods
+  ControlFollow scheduleModInsertion mods
 
+-- Extend an existing schedule control with a newly discovered schedule mod
+extendScheduleControl' :: ScheduleControl -> ScheduleMod -> ScheduleControl
+extendScheduleControl' ControlDefault m = ControlAwait [m]
+extendScheduleControl' (ControlAwait mods) m =
+  case scheduleModControl m of
+    ControlDefault     -> ControlAwait (mods++[m])
+    ControlAwait mods' ->
+      let common = length mods - length mods' in
+      assert (common >= 0 && drop common mods==mods') $
+      ControlAwait (take common mods++[m])
+    ControlFollow stepIds mods' ->
+      let common = length mods - length mods' - 1
+          m'     = mods !! common
+          m''    = m'{ scheduleModInsertion =
+                         takeWhile (/=scheduleModTarget m)
+                                   (scheduleModInsertion m')
+                         ++
+                         scheduleModInsertion m }
+      in
+      assert (common >= 0) $
+      assert (drop (common+1) mods == mods') $
+      assert (scheduleModTarget m `elem` scheduleModInsertion m') $
+      ControlAwait (take common mods++[m''])
+
+extendScheduleControl control m =
+  let control' = extendScheduleControl' control m in
+  {-Debug.trace (unlines ["Extending "++show control,
+                        "     with "++show m,
+                        "   yields "++show control']) -}
+              control'

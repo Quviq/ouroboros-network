@@ -47,10 +47,12 @@ import           Prelude
 
 import           Data.Dynamic (fromDynamic)
 import           Data.List (intercalate)
+import qualified Data.Set as Set
 import           Data.Typeable (Typeable)
 
 import           Control.Exception (throw)
 
+import           Control.Monad
 import           Control.Monad.ST.Lazy
 
 import           Control.Monad.Class.MonadThrow as MonadThrow
@@ -236,26 +238,45 @@ exploreSimTrace ::
   forall a test. Testable test =>
     Int -> (forall s. IOSim s a) -> (Trace a -> test) -> Property
 exploreSimTrace n mainAction k =
-  -- ALERT!!! Impure code: readRaces must be called *after* we have
-  -- finished with trace.
-  let (readRaces,trace) = detachTraceRaces $
-                            detectLoopsSimTrace 1000000 $
-                              controlSimTrace ControlDefault mainAction
-  in k trace .&&.
-     let races = take n $ readRaces()
-     in tabulate "Number of races explored" [bucket (length races)] $
-        conjoinPar
-          [ --Debug.trace "New schedule:" $
-            --Debug.trace ("  "++show r) $
-            counterexample ("Schedule control: " ++ show r) $
-            k (removeTraceRaces (detectLoopsSimTrace 1000000 $
-                                   controlSimTrace (ControlAwait [r]) mainAction))
-          | r <- races ]
-  where bucket n | n<10 = show n
-        bucket n | n<50 = let n'=show (n `div` 10) in n'++"0-"++n'++"9"
-        bucket n        = buck 50
-          where buck low | n<2*low = show low++"-"++show (2*low-1)
-                         | otherwise = buck (2*low)
+  explore n 3 ControlDefault .&&.
+  tabulate "Modified schedules explored" [show (cacheSize ())] True
+  where
+    explore n m control =
+    
+      -- ALERT!!! Impure code: readRaces must be called *after* we have
+      -- finished with trace.
+      let (readRaces,trace) = detachTraceRaces $
+                                detectLoopsSimTrace 1000000 $
+                                  controlSimTrace control mainAction
+      in (counterexample ("Schedule control: " ++ show control) $ k trace) .&&.
+         let limit     = (n+m-1) `div` m
+             races     = take limit . filter (not . cached) $ readRaces()
+             branching = length races
+         in tabulate "Races explored" (map show races) $
+            tabulate "Branching factor" [bucket branching] $
+            conjoinPar
+              [ --Debug.trace "New schedule:" $
+                --Debug.trace ("  "++show r) $
+                counterexample ("Schedule control: " ++ show r) $
+                explore n' ((m-1) `max` 1) r
+              | (r,n') <- zip races (divide (n-branching) branching) ]
+    bucket n | n<10 = show n
+    bucket n | n<50 = let n'=show (n `div` 10) in n'++"0-"++n'++"9"
+    bucket n        = buck 50
+      where buck low | n<2*low = show low++"-"++show (2*low-1)
+                     | otherwise = buck (2*low)
+    divide n k =
+      [ n `div` k + if i<n `mod` k then 1 else 0
+      | i <- [0..k-1] ]
+    -- It is possible for the same control to be generated several times.
+    -- To avoid exploring them twice, we keep a cache of explored schedules.
+    cache = unsafePerformIO $ newIORef $
+              -- we use n here just to be sure the reference cannot be
+              -- lifted out of exploreSimTrace
+              if n>=0 then Set.empty else error "exploreSimTrace: negative argument"
+    cached m = unsafePerformIO $ atomicModifyIORef' cache $ \set ->
+      (Set.insert m set, Set.member m set)
+    cacheSize () = unsafePerformIO $ Set.size <$> readIORef cache
 
 -- Detect loops
 detectLoopsSimTrace :: Int -> Trace a -> Trace a
@@ -266,4 +287,3 @@ detectLoopsSimTrace n trace = go trace
             Just (Trace a b c d t')     -> Trace a b c d (go t')
             Just (TraceRacesFound a t') -> TraceRacesFound a (go t')
             Just t'                     -> t'
-
