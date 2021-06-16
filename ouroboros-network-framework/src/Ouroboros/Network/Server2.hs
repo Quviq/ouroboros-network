@@ -34,6 +34,8 @@ module Ouroboros.Network.Server2
   ) where
 
 import           Control.Monad.Class.MonadAsync
+import           Control.Monad.Class.MonadFork
+import           Control.Monad.Class.MonadSay
 import           Control.Monad.Class.MonadSTM.Strict
 import           Control.Monad.Class.MonadThrow hiding (handle)
 import           Control.Monad.Class.MonadTime
@@ -107,6 +109,7 @@ data ServerArguments (muxMode  :: MuxMode) socket peerAddr versionNumber bytes m
 run :: forall muxMode socket peerAddr versionNumber m a b.
        ( MonadAsync m
        , MonadCatch m
+       , MonadSay   m
        , MonadTime  m
        , MonadTimer m
        , HasResponder muxMode ~ True
@@ -156,6 +159,7 @@ run ServerArguments {
     acceptLoop :: Accept m socket peerAddr
                -> m Void
     acceptLoop acceptOne = do
+      myThreadId >>= (`labelThread` "acceptLoop")
       runConnectionRateLimits
         (TrAcceptPolicyTrace `contramap` tracer)
         (numberOfConnections serverConnectionManager)
@@ -172,6 +176,7 @@ run ServerArguments {
           -- server terminates.
           withAsync
             (do
+              myThreadId >>= (`labelThread` "accepted")
               a <-
                 includeInboundConnection
                   serverConnectionManager

@@ -899,6 +899,7 @@ bidirectionalExperiment
     snocket socket0 socket1 localAddr0 localAddr1
     clientAndServerData0 clientAndServerData1 = do
       lock <- newTMVarIO ()
+      let withLock _ = id
       -- connect lock: only one side can run 'requestOutboundConnection' in
       -- turn.  Otherwise when both sides call 'requestOutboundConnection' they
       -- both will run 'connect' and one of the calls will fail.  Using a lock
@@ -1132,6 +1133,9 @@ instance (Arbitrary peerAddr, Arbitrary req, Arbitrary resp, Arbitrary acc,
 newtype TestAddr = TestAddr { unTestAddr :: Snocket.TestAddress Int }
   deriving (Show, Eq, Ord)
 
+ppAddr :: Show a => Snocket.TestAddress a -> String
+ppAddr (Snocket.TestAddress x) = "ip:" ++ show x
+
 instance Arbitrary TestAddr where
   arbitrary = TestAddr . Snocket.TestAddress <$> choose (1, 100)
 
@@ -1142,6 +1146,7 @@ multinodeExperiment
        , MonadAsync m
        , MonadLabelledSTM m
        , MonadSay m
+       , peerAddr ~ Snocket.TestAddress Int
        , Ord peerAddr, Show peerAddr, Typeable peerAddr, Eq peerAddr
        , Eq (LazySTM.TVar m (ConnectionState
                                 peerAddr
@@ -1166,20 +1171,21 @@ multinodeExperiment snocket addrFamily serverAddr serverData (MultiNodeScript sc
   socket <- Snocket.open snocket addrFamily
   Snocket.bind   snocket socket serverAddr
   Snocket.listen snocket socket
+  lock <- newTMVarIO ()
   withBidirectionalConnectionManager "main" snocket socket (Just serverAddr) serverData
     $ \ connectionManager _ serverAsync resetServerProtocols -> do
         link serverAsync
-        loop connectionManager resetServerProtocols Map.empty Map.empty [] script
+        loop lock connectionManager resetServerProtocols Map.empty Map.empty [] script
   where
-    loop _ _ _ _ results [] = foldr (.&&.) (property True) <$> atomically (mapM readTMVar results)
-    loop serverCM resetServerProtocols nodes clients results (event : script) =
+    loop _ _ _ _ _ results [] = foldr (.&&.) (property True) <$> atomically (mapM readTMVar results)
+    loop lock serverCM resetServerProtocols nodes clients results (event : script) =
       case event of
 
         StartClient delay localAddr clientData -> do
           threadDelay delay
           withInitiatorOnlyConnectionManager ("client-" ++ show localAddr) snocket clientData
             $ \ connectionManager ->
-              loop serverCM resetServerProtocols nodes (Map.insert localAddr (connectionManager, clientData) clients) results script
+              loop lock serverCM resetServerProtocols nodes (Map.insert localAddr (connectionManager, clientData) clients) results script
 
         StartServer delay localAddr serverData -> do
           threadDelay delay
@@ -1189,30 +1195,31 @@ multinodeExperiment snocket addrFamily serverAddr serverData (MultiNodeScript sc
           withBidirectionalConnectionManager ("node-" ++ show localAddr) snocket fd (Just localAddr) serverData
             $ \ connectionManager _ serverAsync _ -> do
               link serverAsync
-              loop serverCM resetServerProtocols (Map.insert localAddr (connectionManager, serverData) nodes) clients results script
+              loop lock serverCM resetServerProtocols (Map.insert localAddr (connectionManager, serverData) nodes) clients results script
 
         ClientConnection delay clientAddr -> do
           threadDelay delay
           let (cm, clientData) = clients Map.! clientAddr
-          result <- runConnection SingInitiatorMode cm clientAddr serverAddr serverData clientData
-          loop serverCM resetServerProtocols nodes clients (result : results) script
+          result <- runConnection lock SingInitiatorMode cm clientAddr serverAddr serverData clientData
+          loop lock serverCM resetServerProtocols nodes clients (result : results) script
 
         InboundNodeToNode delay nodeAddr -> do
           threadDelay delay
           let (cm, nodeData) = nodes Map.! nodeAddr
-          result <- runConnection SingInitiatorResponderMode cm nodeAddr serverAddr serverData nodeData
-          loop serverCM resetServerProtocols nodes clients (result : results) script
+          result <- runConnection lock SingInitiatorResponderMode cm nodeAddr serverAddr serverData nodeData
+          loop lock serverCM resetServerProtocols nodes clients (result : results) script
 
         OutboundNodeToNode delay nodeAddr -> do
           threadDelay delay
           let (_, nodeData) = nodes Map.! nodeAddr
-          result <- runConnection SingInitiatorResponderMode serverCM serverAddr nodeAddr nodeData serverData
+          result <- runConnection lock SingInitiatorResponderMode serverCM serverAddr nodeAddr nodeData serverData
           resetServerProtocols
-          loop serverCM resetServerProtocols nodes clients (result : results) script
+          loop lock serverCM resetServerProtocols nodes clients (result : results) script
 
     runConnection :: forall muxMode handleError a.
       (HasInitiator muxMode ~ True, Show handleError)
-      => SingMuxMode muxMode
+      => StrictTMVar m ()
+      -> SingMuxMode muxMode
       -> ConnectionManager muxMode socket peerAddr
                            (Handle muxMode peerAddr ByteString m [resp] a)
                            handleError m
@@ -1220,18 +1227,21 @@ multinodeExperiment snocket addrFamily serverAddr serverData (MultiNodeScript sc
      -> ClientAndServerData req resp acc
      -> ClientAndServerData req resp acc
      -> m (StrictTMVar m Property)
-    runConnection singMuxMode connectionManager clientAddr serverAddr serverData clientData = do
+    runConnection lock singMuxMode connectionManager clientAddr serverAddr serverData clientData = do
       result <- atomically newEmptyTMVar
+      labelTMVarIO result ("res(" ++ ppAddr clientAddr ++ "=>" ++ ppAddr serverAddr ++ ")")
       now <- getCurrentTime
       forkIO $ do
-        labelMe (show clientAddr ++ " => " ++ show serverAddr)
+        labelMe (ppAddr clientAddr ++ "=>" ++ ppAddr serverAddr)
         (rs :: [Either SomeException (Bundle [resp])]) <-
             replicateM
               (numberOfRounds clientData)
               (bracket
-                 (requestOutboundConnection connectionManager serverAddr)
+                 (withLock lock
+                  (requestOutboundConnection connectionManager serverAddr))
                  (\_ -> unregisterOutboundConnection connectionManager serverAddr)
                  (\connHandle -> do
+                  say "Got connection"
                   case connHandle of
                     Connected _ _ (Handle mux muxBundle _ :: Handle muxMode peerAddr ByteString m [resp] a) ->
                       try @_ @SomeException $ runInitiatorProtocols singMuxMode mux muxBundle
@@ -1346,12 +1356,12 @@ script = MultiNodeScript [ StartServer 0 (TestAddr $ Snocket.TestAddress 17)
 
 simulatedPropertyWithTimeout :: DiffTime -> (forall s. IOSim s Property) -> Property
 simulatedPropertyWithTimeout t test =
-  exploreSimTrace 0 (timeout t $ exploreRaces >> test) $ \ tr ->
+  exploreSimTrace 50 (timeout t $ exploreRaces >> test) $ \ tr ->
   counterexample ("\nTrace:\n" ++ ppTrace tr) $
   case traceResult False tr of
     Left failure ->
       counterexample ("Failure:\n" ++ displayException failure) False
-    Right prop -> fromMaybe (counterexample "timeout" $ property False) Nothing -- prop
+    Right prop -> fromMaybe (counterexample "timeout" $ property False) prop
   -- where
   --   tr = runSimTrace $ timeout t test
 

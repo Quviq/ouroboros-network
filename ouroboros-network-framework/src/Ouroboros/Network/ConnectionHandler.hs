@@ -253,6 +253,7 @@ makeConnectionHandler muxTracer singMuxMode
         runWithUnmask :: (forall x. m x -> m x) -> m ()
         runWithUnmask unmask =
           classifyExceptions tracer remoteAddress OutboundError $ do
+            myThreadId >>= (`labelThread` "outboundConnectionHandler")
             handshakeBearer <- mkMuxBearer sduHandshakeTimeout socket
             hsResult <-
               unmask (runHandshakeClient handshakeBearer
@@ -313,6 +314,7 @@ makeConnectionHandler muxTracer singMuxMode
         runWithUnmask :: (forall x. m x -> m x) -> m ()
         runWithUnmask unmask =
           classifyExceptions tracer remoteAddress InboundError $ do
+            myThreadId >>= (`labelThread` "inboundConnectionHandler")
             handshakeBearer <- mkMuxBearer sduHandshakeTimeout socket
             hsResult <-
               unmask (runHandshakeServer handshakeBearer
@@ -324,7 +326,7 @@ makeConnectionHandler muxTracer singMuxMode
               `catch` \(err :: SomeException) -> do
                 atomically $ writePromise (Left (HandleError err))
                 throwIO err
- 
+
             case hsResult of
               Left !err -> do
                 atomically $ writePromise (Left (HandleHandshakeServerError err))

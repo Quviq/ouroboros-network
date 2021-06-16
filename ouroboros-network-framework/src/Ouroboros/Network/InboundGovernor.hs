@@ -35,6 +35,7 @@ import           Control.Applicative (Alternative (..), (<|>))
 import           Control.Monad (foldM)
 import           Control.Monad.Class.MonadAsync
 import           Control.Monad.Class.MonadFork
+import           Control.Monad.Class.MonadSay
 import qualified Control.Monad.Class.MonadSTM as LazySTM
 import           Control.Monad.Class.MonadSTM.Strict
 import           Control.Monad.Class.MonadThrow hiding (handle)
@@ -82,6 +83,7 @@ import qualified Ouroboros.Network.InboundGovernor.ControlChannel as ControlChan
 inboundGovernor :: forall (muxMode :: MuxMode) socket peerAddr versionNumber m a b.
                    ( MonadAsync m
                    , MonadCatch m
+                   , MonadSay   m
                    , MonadTime  m
                    , MonadTimer m
                    , Ord peerAddr
@@ -133,6 +135,7 @@ inboundGovernor tracer serverControlChannel protocolIdleTimeout
             csDataFlow
             (Handle csMux muxBundle _)) -> do
 
+              say "NewConnection"
               traceWith tracer (TrNewConnection provenance connId)
 
               igsConnections <- Map.alterF
@@ -232,6 +235,7 @@ inboundGovernor tracer serverControlChannel protocolIdleTimeout
 
         MuxFinished connId merr -> do
 
+          say $ "MuxFinshed (" ++ (case merr of Nothing -> "clean"; Just{} -> "error") ++ ")"
           case merr of
             Nothing  -> traceWith tracer (TrMuxCleanExit connId)
             Just err -> traceWith tracer (TrMuxErrored connId err)
@@ -249,7 +253,8 @@ inboundGovernor tracer serverControlChannel protocolIdleTimeout
                                                    },
               tResult
             } ->
-          let num = miniProtocolNum mpdMiniProtocol in
+          let num = miniProtocolNum mpdMiniProtocol in do
+          say $ "MiniProtocol " ++ show num ++ " terminated"
           case tResult of
             Left e -> do
               -- a mini-protocol errored.  In this case mux will shutdown, and
@@ -294,6 +299,7 @@ inboundGovernor tracer serverControlChannel protocolIdleTimeout
           --    DemotedToCold^{dataFlow}_{Remote} : InboundState Duplex
           --                                      → InboundIdleState Duplex
           -- @
+          say "WaitIdleRemote"
           res <- demotedToColdRemote connectionManager
                                      (remoteAddress connId)
           traceWith tracer (TrWaitIdleRemote connId res)
@@ -312,6 +318,7 @@ inboundGovernor tracer serverControlChannel protocolIdleTimeout
         --    Awake^{dataFlow}_{Remote}
         -- @
         AwakeRemote connId -> do
+          say "AwakeRemote"
           -- notify the connection manager about the transiton
           res <- promotedToWarmRemote connectionManager
                                       (remoteAddress connId)
@@ -324,11 +331,13 @@ inboundGovernor tracer serverControlChannel protocolIdleTimeout
             inboundGovernorLoop state'
 
         RemotePromotedToHot connId -> do
+          say "RemotePromotedToHot"
           traceWith tracer (TrPromotedToHotRemote connId)
           let state' = updateRemoteState connId RemoteHot state
           inboundGovernorLoop state'
 
         CommitRemote connId -> do
+          say "CommitRemote"
           res <- unregisterInboundConnection connectionManager
                                              (remoteAddress connId)
           traceWith tracer $ TrDemotedToColdRemote connId res
