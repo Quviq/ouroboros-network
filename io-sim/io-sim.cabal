@@ -61,6 +61,8 @@ library
                        -Wpartial-fields
                        -Widentities
                        -Wredundant-constraints
+                       -threaded
+                       +RTS -N -RTS
   if flag(asserts)
      ghc-options:      -fno-ignore-asserts
 
@@ -84,3 +86,5 @@ test-suite test
   ghc-options:         -Wall
                        -fno-ignore-asserts
                        -threaded
+                       +RTS -N -RTS
+                       
