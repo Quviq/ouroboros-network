@@ -1959,8 +1959,7 @@ updateRaces newStep@Step{ stepThreadId = tid, stepEffect = newEffect }
             newConcurrent0
             races@Races{ activeRaces } =
   let -- a new step cannot race with any threads that it just woke up
-      newConcurrent = Set.filter (not . isTestThreadId) $
-                        foldr Set.delete newConcurrent0 (effectWakeup newEffect)
+      newConcurrent = foldr Set.delete newConcurrent0 (effectWakeup newEffect)
       new | isTestThreadId tid     = []  -- test threads do not race
           | Set.null newConcurrent = []  -- cannot race with anything
           | justBlocking           = []  -- no need to defer a blocking transaction
@@ -1988,6 +1987,7 @@ updateRaces newStep@Step{ stepThreadId = tid, stepEffect = newEffect }
                 -- We record only the first race with each thread
                 stepRaces' | control == ControlDefault &&
                              tid `notElem` map stepThreadId stepRaces &&
+                             not (isTestThreadId tid) &&
                              racingSteps step newStep = newStep : stepRaces
                            | otherwise                = stepRaces
             in stepInfo { stepInfoConcurrent = effectForks newEffect `Set.union` concurrent',
