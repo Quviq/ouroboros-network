@@ -2089,7 +2089,11 @@ stepInfoToScheduleMods
                 control
                 (takeWhile (/=stepStepId step')
                    (map stepStepId (reverse nondep))
-                   ++ [stepStepId step', stepStepId step])
+                   ++ [stepStepId step'])
+                   -- It should be unnecessary to include the delayed step in the insertion,
+                   -- since the default scheduling should run it anyway. Removing it may
+                   -- help avoid redundant schedules.
+                   -- ++ [stepStepId step])
   | step' <- races ]
 
 traceFinalRacesFound :: SimState s a -> Trace a -> Trace a
