@@ -1030,7 +1030,7 @@ schedule thread@Thread{
               effect'     = effect
                          <> readEffects read
                          <> writeEffects written
-                         <> wakeupEffects wakeup
+                         <> wakeupEffects unblocked
               thread'     = thread { threadControl = ThreadControl (k x) ctl,
                                      threadVClock  = vClock',
                                      threadEffect  = effect' }
@@ -1112,10 +1112,12 @@ schedule thread@Thread{
 
     ThrowTo e tid' k -> do
       let thread'    = thread { threadControl = ThreadControl k ctl,
-                                threadEffect  = effect <> throwToEffect tid',
+                                threadEffect  = effect <> throwToEffect tid' <> wakeUpEffect,
                                 threadVClock  = vClock `lubVClock` vClockTgt }
-          (vClockTgt, 
+          (vClockTgt,
+           wakeUpEffect,
            willBlock) = (threadVClock t,
+                         if threadBlocked t then wakeupEffects [tid'] else mempty,
                          not (threadInterruptible t || threadDone t))
             where Just t = Map.lookup tid' threads
             
@@ -1367,6 +1369,7 @@ unblockThreads vClock wakeup simstate@SimState {runqueue, threads} =
     unblocked = [ tid
                 | tid <- wakeup
                 , case Map.lookup tid threads of
+                       Just Thread { threadDone    = True } -> False
                        Just Thread { threadBlocked = True } -> True
                        _                                    -> False
                 ]

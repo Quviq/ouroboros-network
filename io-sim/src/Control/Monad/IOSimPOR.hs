@@ -233,7 +233,6 @@ runSimTrace mainAction = removeTraceRaces $ runST (runSimTraceST mainAction)
 controlSimTrace :: forall a. ScheduleControl -> (forall s. IOSim s a) -> Trace a
 controlSimTrace control mainAction = runST (controlSimTraceST control mainAction)
 
--- Just an initial version, which tries to reverse ONE race
 exploreSimTrace ::
   forall a test. Testable test =>
     Int -> (forall s. IOSim s a) -> (Trace a -> test) -> Property
