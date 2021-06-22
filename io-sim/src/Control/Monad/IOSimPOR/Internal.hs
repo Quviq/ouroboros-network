@@ -2162,10 +2162,11 @@ extendScheduleControl' (ControlAwait mods) m =
     ControlAwait mods' ->
       let common = length mods - length mods' in
       assert (common >= 0 && drop common mods==mods') $
-      ControlAwait (take common mods++[m])
+      ControlAwait (take common mods++[m{ scheduleModControl = ControlDefault }])
     ControlFollow stepIds mods' ->
       let common = length mods - length mods' - 1
           m'     = mods !! common
+          isUndo = scheduleModTarget m' `elem` scheduleModInsertion m
           m''    = m'{ scheduleModInsertion =
                          takeWhile (/=scheduleModTarget m)
                                    (scheduleModInsertion m')
@@ -2175,11 +2176,14 @@ extendScheduleControl' (ControlAwait mods) m =
       assert (common >= 0) $
       assert (drop (common+1) mods == mods') $
       assert (scheduleModTarget m `elem` scheduleModInsertion m') $
-      ControlAwait (take common mods++[m''])
+      if isUndo
+        then ControlAwait mods          -- reject this mod... it's undoing a previous one
+        else ControlAwait (take common mods++[m''])
 
 extendScheduleControl control m =
   let control' = extendScheduleControl' control m in
-  {-Debug.trace (unlines ["Extending "++show control,
+  Debug.trace (unlines ["",
+                        "Extending "++show control,
                         "     with "++show m,
-                        "   yields "++show control']) -}
+                        "   yields "++show control'])
               control'
