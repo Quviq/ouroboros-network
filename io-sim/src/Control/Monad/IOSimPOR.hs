@@ -245,7 +245,7 @@ exploreSimTrace ::
 exploreSimTrace n mainAction k =
   traces `seq`
   explore n 3 ControlDefault .&&.
-  tabulate "Modified schedules explored" [show (cacheSize ())] (noDuplicateTraces True)
+  tabulate "Modified schedules explored" [bucket (cacheSize ())] (noDuplicateTraces True)
   where
     explore n m control =
 
