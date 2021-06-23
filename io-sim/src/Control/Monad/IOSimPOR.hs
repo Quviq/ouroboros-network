@@ -1,6 +1,8 @@
 {-# LANGUAGE RankNTypes          #-}
 {-# LANGUAGE ScopedTypeVariables #-}
 
+{-# OPTIONS_GHC -fno-warn-name-shadowing #-}
+
 module Control.Monad.IOSimPOR (
   -- * Simulation monad
   IOSim,
@@ -54,7 +56,6 @@ import           Data.Typeable (Typeable)
 
 import           Control.Exception (throw)
 
-import           Control.Monad
 import           Control.Monad.ST.Lazy
 
 import           Control.Monad.Class.MonadThrow as MonadThrow
@@ -86,9 +87,10 @@ selectTraceEvents fn = go
     go (TraceMainException _ e _)       = throw (FailureException e)
     go (TraceDeadlock      _   threads) = throw (FailureDeadlock threads)
     go (TraceMainReturn    _ _ _)       = []
+    go TraceLoop{}                      = error "Impossible: selectTraceEvents _ TraceLoop{}"
 
 
---selectTraceRaces :: Trace a -> [Control.Monad.IOSimPOR.Internal.ScheduleMod]
+selectTraceRaces :: Trace a -> [ScheduleControl]
 selectTraceRaces = go
   where
     go (Trace _ _ _ _ trace)         = go trace
@@ -118,6 +120,7 @@ removeTraceRaces = go
 -- unsafe, of course, since that function may return different results
 -- at different times.
 
+detachTraceRaces :: Trace a -> (() -> [ScheduleControl], Trace a)
 detachTraceRaces trace = unsafePerformIO $ do
   races <- newIORef []
   let readRaces ()  = concat . reverse . unsafePerformIO $ readIORef races
@@ -218,6 +221,7 @@ traceResult strict = go
     go (TraceMainReturn _ x _)          = Right x
     go (TraceMainException _ e _)       = Left (FailureException e)
     go (TraceDeadlock   _   threads)    = Left (FailureDeadlock threads)
+    go TraceLoop{}                      = error "Impossible: traceResult _ TraceLoop{}"
 
 traceEvents :: Trace a -> [(Time, ThreadId, Maybe ThreadLabel, TraceEvent)]
 traceEvents (Trace time tid tlbl event t) = (time, tid, tlbl, event)
@@ -244,7 +248,7 @@ exploreSimTrace n mainAction k =
   tabulate "Modified schedules explored" [show (cacheSize ())] (noDuplicateTraces True)
   where
     explore n m control =
-    
+
       -- ALERT!!! Impure code: readRaces must be called *after* we have
       -- finished with trace.
       let (readRaces,trace) = detachTraceRaces $
