@@ -2066,6 +2066,7 @@ instance Show ScheduleMod where
       showsPrec 11 tgt .
       showSpace .
       showsPrec 11 ctrl .
+      --showString "..." .
       showSpace .
       showsPrec 11 insertion
 
@@ -2184,8 +2185,8 @@ extendScheduleControl' (ControlAwait mods) m =
 
 extendScheduleControl control m =
   let control' = extendScheduleControl' control m in
-  {- Debug.trace (unlines ["",
+  Debug.trace (unlines ["",
                         "Extending "++show control,
                         "     with "++show m,
-                        "   yields "++show control']) -}
+                        "   yields "++show control']) 
               control'

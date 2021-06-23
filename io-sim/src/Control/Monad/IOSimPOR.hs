@@ -13,6 +13,7 @@ module Control.Monad.IOSimPOR (
   runSimTrace,
   controlSimTrace,
   exploreSimTrace,
+  exploreSelectedSimTrace,
   ScheduleControl(..),
   runSimTraceST,
   liftST,
@@ -48,6 +49,7 @@ import           Prelude
 import           Data.Dynamic (fromDynamic)
 import           Data.List (intercalate)
 import qualified Data.Set as Set
+import qualified Data.Map as Map
 import           Data.Typeable (Typeable)
 
 import           Control.Exception (throw)
@@ -234,11 +236,12 @@ controlSimTrace :: forall a. ScheduleControl -> (forall s. IOSim s a) -> Trace a
 controlSimTrace control mainAction = runST (controlSimTraceST control mainAction)
 
 exploreSimTrace ::
-  forall a test. Testable test =>
+  forall a test. (Testable test, Show a) =>
     Int -> (forall s. IOSim s a) -> (Trace a -> test) -> Property
 exploreSimTrace n mainAction k =
+  traces `seq`
   explore n 3 ControlDefault .&&.
-  tabulate "Modified schedules explored" [show (cacheSize ())] True
+  tabulate "Modified schedules explored" [show (cacheSize ())] (noDuplicateTraces True)
   where
     explore n m control =
     
@@ -247,16 +250,18 @@ exploreSimTrace n mainAction k =
       let (readRaces,trace) = detachTraceRaces $
                                 detectLoopsSimTrace 1000000 $
                                   controlSimTrace control mainAction
-      in (counterexample ("Schedule control: " ++ show control) $ k trace) .&&.
+      in addTrace control trace $
+         (counterexample ("Schedule control: " ++ show control) $ k trace) .&&.
          let limit     = (n+m-1) `div` m
              races     = take limit . filter (not . cached) $ readRaces()
              branching = length races
-         in tabulate "Races explored" (map show races) $
+         in -- tabulate "Races explored" (map show races) $
             tabulate "Branching factor" [bucket branching] $
+            tabulate "Race reversals per schedule" [bucket (raceReversals control)] $
             conjoinPar
-              [ --Debug.trace "New schedule:" $
-                --Debug.trace ("  "++show r) $
-                counterexample ("Schedule control: " ++ show r) $
+              [ Debug.trace "New schedule:" $
+                Debug.trace ("  "++show r) $
+                --counterexample ("Schedule control: " ++ show r) $
                 explore n' ((m-1) `max` 1) r
               | (r,n') <- zip races (divide (n-branching) branching) ]
     bucket n | n<10 = show n
@@ -277,6 +282,51 @@ exploreSimTrace n mainAction k =
       (Set.insert m set, Set.member m set)
     cacheSize () = unsafePerformIO $ Set.size <$> readIORef cache
 
+    -- debugging code
+    traces :: IORef (Map.Map String [ScheduleControl])
+    traces = unsafePerformIO $ newIORef $ Map.empty
+    addTrace :: Show a => ScheduleControl -> Trace a -> b -> b
+    addTrace scheduleMod trace x = unsafePerformIO $ do
+      atomicModifyIORef' traces $ \m -> (Map.insertWith (++) (show trace) [scheduleMod] m,())
+      return x
+    noDuplicateTraces prop = unsafePerformIO $ do
+      m <- readIORef traces
+      return $
+        conjoin [ counterexample (unlines (show tr:"\nresults from\n":map show sm)) $
+                  length sm == 1
+                | (tr,sm) <- Map.toList m]
+        .&&. prop
+
+exploreSelectedSimTrace :: 
+  forall a test. Testable test =>
+    [Int] -> (forall s. IOSim s a) -> (Trace a -> test) -> Property
+exploreSelectedSimTrace is mainAction k =
+  explore is ControlDefault
+  where
+    explore is control =
+    
+      -- ALERT!!! Impure code: readRaces must be called *after* we have
+      -- finished with trace.
+      let (readRaces,trace) = detachTraceRaces $
+                                detectLoopsSimTrace 1000000 $
+                                  controlSimTrace control mainAction
+      in (counterexample ("Schedule control: " ++ show control) $ k trace) .&&.
+         case is of
+           [] -> property True
+           (i:is') ->
+             let races     = filter (not . cached) $ readRaces()
+                 r         = races !! i
+             in --Debug.trace "New schedule:" $
+                --Debug.trace ("  "++show r) $
+                counterexample ("Schedule control: " ++ show r) $
+                explore is' r
+    -- It is possible for the same control to be generated several times.
+    -- To avoid exploring them twice, we keep a cache of explored schedules.
+    cache = unsafePerformIO $ newIORef $ Set.empty
+    cached m = unsafePerformIO $ atomicModifyIORef' cache $ \set ->
+      (Set.insert m set, Set.member m set)
+    cacheSize () = unsafePerformIO $ Set.size <$> readIORef cache
+
 -- Detect loops
 detectLoopsSimTrace :: Int -> Trace a -> Trace a
 detectLoopsSimTrace n trace = go trace
@@ -286,3 +336,6 @@ detectLoopsSimTrace n trace = go trace
             Just (Trace a b c d t')     -> Trace a b c d (go t')
             Just (TraceRacesFound a t') -> TraceRacesFound a (go t')
             Just t'                     -> t'
+
+raceReversals ControlDefault = 0
+raceReversals (ControlAwait mods) = length mods
