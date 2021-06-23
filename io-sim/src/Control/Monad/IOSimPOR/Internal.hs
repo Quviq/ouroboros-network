@@ -1975,24 +1975,26 @@ updateRaces newStep@Step{ stepThreadId = tid, stepEffect = newEffect }
                         }]
       justBlocking = blocking && onlyReadEffect newEffect
       updateActive =
-        [ -- if this step depends on the previous step, then any threads
-          -- that it wakes up become dependent also.
+        [ -- if this step depends on the previous step, or is not concurrent,
+          -- then any threads that it wakes up become non-concurrent also.
           let lessConcurrent = foldr Set.delete concurrent (effectWakeup newEffect) in
           if tid `elem` concurrent then
-            let (nondep', concurrent')
-                  | hbfStep (stepThreadId step) (stepStep step) (stepVClock newStep) =
-                    (nondep, Set.delete tid lessConcurrent)
-                  | otherwise =
-                    (newStep : nondep, concurrent)
+            let theseStepsRace = not (isTestThreadId tid) && racingSteps step newStep
+                happensBefore  = hbfStep (stepThreadId step) (stepStep step) (stepVClock newStep)
+                nondep' | happensBefore = nondep
+                        | otherwise     = newStep : nondep
+                -- We will only record the first race with each thread---reversing
+                -- the first race makes the next race detectable. Thus we remove a
+                -- thread from the concurrent set after the first race.
+                concurrent' | happensBefore  = Set.delete tid lessConcurrent
+                            | theseStepsRace = Set.delete tid concurrent
+                            | otherwise      = concurrent
                 -- Here we record discovered races.
-                -- We only record a race if we are following the default schedule,
+                -- We only record a new race if we are following the default schedule,
                 -- to avoid finding the same race in different parts of the search space.
-                -- We record only the first race with each thread
                 stepRaces' | control == ControlDefault &&
-                             tid `notElem` map stepThreadId stepRaces &&
-                             not (isTestThreadId tid) &&
-                             racingSteps step newStep = newStep : stepRaces
-                           | otherwise                = stepRaces
+                             theseStepsRace  = newStep : stepRaces
+                           | otherwise       = stepRaces
             in stepInfo { stepInfoConcurrent = effectForks newEffect `Set.union` concurrent',
                           stepInfoNonDep     = nondep',
                           stepInfoRaces      = stepRaces'
