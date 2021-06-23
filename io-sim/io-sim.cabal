@@ -28,6 +28,7 @@ library
   exposed-modules:     Control.Monad.IOSim,
                        Control.Monad.IOSimPOR
   other-modules:       Control.Monad.IOSim.Internal,
+                       Control.Monad.IOSim.Types,
                        Control.Monad.IOSimPOR.Internal
                        Control.Monad.IOSimPOR.QuickCheckUtils
   default-language:    Haskell2010
@@ -87,4 +88,4 @@ test-suite test
                        -fno-ignore-asserts
                        -threaded
                        +RTS -N -RTS
-                       
+
