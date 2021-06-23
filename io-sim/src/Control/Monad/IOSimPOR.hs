@@ -263,8 +263,8 @@ exploreSimTrace n mainAction k =
             tabulate "Branching factor" [bucket branching] $
             tabulate "Race reversals per schedule" [bucket (raceReversals control)] $
             conjoinPar
-              [ Debug.trace "New schedule:" $
-                Debug.trace ("  "++show r) $
+              [ --Debug.trace "New schedule:" $
+                --Debug.trace ("  "++show r) $
                 --counterexample ("Schedule control: " ++ show r) $
                 explore n' ((m-1) `max` 1) r
               | (r,n') <- zip races (divide (n-branching) branching) ]
