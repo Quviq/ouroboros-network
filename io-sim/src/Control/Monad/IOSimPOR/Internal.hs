@@ -1921,7 +1921,8 @@ updateRaces newStep@Step{ stepThreadId = tid, stepEffect = newEffect }
                 -- Here we record discovered races.
                 -- We only record a new race if we are following the default schedule,
                 -- to avoid finding the same race in different parts of the search space.
-                stepRaces' | control == ControlDefault &&
+                stepRaces' | (control == ControlDefault ||
+                              control == ControlFollow [] []) &&
                              theseStepsRace  = newStep : stepRaces
                            | otherwise       = stepRaces
             in stepInfo { stepInfoConcurrent = effectForks newEffect `Set.union` concurrent',
@@ -2023,11 +2024,11 @@ controlTargets stepId
 controlTargets _stepId _ = False
 
 controlFollows :: StepId -> ScheduleControl -> Bool
-controlFollows _stepId ControlDefault               = True
-controlFollows stepId (ControlFollow (stepId':_) _) = stepId == stepId'
-controlFollows stepId (ControlAwait (smod:_))       = stepId /= scheduleModTarget smod
-controlFollows _      (ControlFollow [] _)          = error "Impossible: controlFollows _ (ControlFollow [] _)"
-controlFollows _      (ControlAwait [])             = error "Impossible: controlFollows _ (ControlAwait [])"
+controlFollows _stepId  ControlDefault               = True
+controlFollows _stepId (ControlFollow [] _)          = True
+controlFollows stepId  (ControlFollow (stepId':_) _) = stepId == stepId'
+controlFollows stepId  (ControlAwait (smod:_))       = stepId /= scheduleModTarget smod
+controlFollows _       (ControlAwait [])             = error "Impossible: controlFollows _ (ControlAwait [])"
 
 advanceControl :: (ThreadId, Int) -> ScheduleControl -> ScheduleControl
 advanceControl (tid,step) (ControlFollow ((tid',step'):sids) tgts)
@@ -2036,17 +2037,13 @@ advanceControl (tid,step) (ControlFollow ((tid',step'):sids) tgts)
        --Debug.trace ("Switching threads from "++show (tid,step)++" to "++show (tid',step')++"\n") $
        ControlFollow ((tid',step'):sids) tgts
   | step == step' =
-      case (sids,tgts) of
-        ([],[]) -> --Debug.trace "Returning to default scheduling\n" $
-                   ControlDefault
-        ([],_)  -> --Debug.trace "Completed explicit schedule\n" $
-                   ControlAwait tgts
-        (_,_)   -> --Debug.trace ("Finished step "++show (tid,step)) $
-                   ControlFollow sids tgts
+      ControlFollow sids tgts
   | otherwise =
       error $ "advanceControl "++show (tid,step)++" cannot follow step "++show step'++"\n"
-advanceControl stepId (ControlFollow [] tgts)  =
-  error $ "advanceControl "++show stepId++" (ControlFollow [] "++show tgts++")"
+advanceControl stepId (ControlFollow [] []) =
+  ControlDefault
+advanceControl stepId (ControlFollow [] tgts) =
+  ControlAwait tgts
 advanceControl stepId c =
   assert (not $ controlTargets stepId c) $
   c
@@ -2082,7 +2079,6 @@ extendScheduleControl' (ControlAwait mods) m =
       in
       assert (common >= 0) $
       assert (drop (common+1) mods == mods') $
-      assert (scheduleModTarget m `elem` scheduleModInsertion m') $
       if isUndo
         then ControlAwait mods          -- reject this mod... it's undoing a previous one
         else ControlAwait (take common mods++[m''])
