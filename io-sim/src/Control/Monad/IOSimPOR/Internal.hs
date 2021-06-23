@@ -1161,11 +1161,12 @@ deschedule Blocked thread@Thread { threadThrowTo = _ : _
     deschedule Interruptable thread { threadMasking = Unmasked } simstate
 
 deschedule Blocked thread simstate@SimState{threads, control} =
-    let thread'  = stepThread $ thread { threadBlocked = True }
+    let thread1 = thread { threadBlocked = True }
+        thread'  = stepThread $ thread1
         threads' = Map.insert (threadId thread') thread' threads in
     reschedule simstate { threads = threads',
-                          races   = updateRacesInSimState thread simstate,
-                          control = advanceControl (threadStepId thread) control }
+                          races   = updateRacesInSimState thread1 simstate,
+                          control = advanceControl (threadStepId thread1) control }
 
 deschedule Terminated thread@Thread { threadId = tid, threadVClock = vClock }
                       simstate@SimState{ curTime = time, control } = do
