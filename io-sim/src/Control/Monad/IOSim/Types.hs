@@ -672,3 +672,28 @@ instance Show ScheduleMod where
       showString " " .
       showsPrec 11 insertion
 
+---
+--- Exploration options
+---
+
+data ExplorationOptions = ExplorationOptions{
+    explorationScheduleBound :: Int,
+    explorationBranching     :: Int,
+    explorationStepTimelimit :: Int,
+    explorationReplay        :: Maybe ScheduleControl
+  }
+  deriving Show
+
+stdExplorationOptions = ExplorationOptions{
+    explorationScheduleBound = 100,
+    explorationBranching     = 3,
+    explorationStepTimelimit = 100000,
+    explorationReplay        = Nothing
+    }
+
+type ExplorationSpec = ExplorationOptions -> ExplorationOptions
+
+withScheduleBound n e = e{explorationScheduleBound = n}
+withBranching     n e = e{explorationBranching     = n}
+withStepTimelimit n e = e{explorationStepTimelimit = n}
+withReplay        r e = e{explorationReplay        = Just r}

@@ -15,8 +15,6 @@ module Control.Monad.IOSimPOR (
   runSimTrace,
   controlSimTrace,
   exploreSimTrace,
-  replaySimTrace,
-  exploreSelectedSimTrace,
   ScheduleControl(..),
   runSimTraceST,
   liftST,
@@ -242,18 +240,25 @@ controlSimTrace control mainAction = runST (controlSimTraceST control mainAction
 
 exploreSimTrace ::
   forall a test. (Testable test, Show a) =>
-    Int -> (forall s. IOSim s a) -> (Trace a -> test) -> Property
-exploreSimTrace n mainAction k =
-  explore n 3 ControlDefault .&&.
-  let size = cacheSize() in size `seq`
-  tabulate "Modified schedules explored" [bucket size] True
+    (ExplorationOptions->ExplorationOptions) ->
+    (forall s. IOSim s a) -> (Trace a -> test) -> Property
+exploreSimTrace optsf mainAction k =
+  case explorationReplay opts of
+    Nothing ->
+      explore (explorationScheduleBound opts) (explorationBranching opts) ControlDefault .&&.
+      let size = cacheSize() in size `seq`
+      tabulate "Modified schedules explored" [bucket size] True
+    Just control ->
+      replaySimTrace mainAction control k
   where
+    opts = optsf stdExplorationOptions
+    
     explore n m control =
 
       -- ALERT!!! Impure code: readRaces must be called *after* we have
       -- finished with trace.
       let (readRaces,trace) = detachTraceRaces $
-                                detectLoopsSimTrace 100000 $ 
+                                detectLoopsSimTrace (explorationStepTimelimit opts) $ 
                                   controlSimTrace control mainAction
       in (counterexample ("Schedule control: " ++ show control) $ k trace) .&&.
          let limit     = (n+m-1) `div` m
@@ -283,51 +288,23 @@ exploreSimTrace n mainAction k =
     -- It is possible for the same control to be generated several times.
     -- To avoid exploring them twice, we keep a cache of explored schedules.
     cache = unsafePerformIO $ newIORef $
-              -- we use n here just to be sure the reference cannot be
+              -- we use opts here just to be sure the reference cannot be
               -- lifted out of exploreSimTrace
-              if n>=0 then Set.empty else error "exploreSimTrace: negative argument"
+              if explorationScheduleBound opts>=0
+                then Set.empty
+                else error "exploreSimTrace: negative schedule bound"
     cached m = unsafePerformIO $ atomicModifyIORef' cache $ \set ->
       (Set.insert m set, Set.member m set)
     cacheSize () = unsafePerformIO $ Set.size <$> readIORef cache
 
 replaySimTrace ::
   forall a test. (Testable test, Show a) =>
-    (forall s. IOSim s a) -> ScheduleControl -> (Trace a -> test) -> test
+    (forall s. IOSim s a) -> ScheduleControl -> (Trace a -> test) -> Property
 replaySimTrace mainAction control k =
   let (readRaces,trace) = detachTraceRaces $
                                 detectLoopsSimTrace 2000000 $ 
                                   controlSimTrace control mainAction
-      in k trace
-
-exploreSelectedSimTrace ::
-  forall a test. Testable test =>
-    [Int] -> (forall s. IOSim s a) -> (Trace a -> test) -> Property
-exploreSelectedSimTrace is mainAction k =
-  explore is ControlDefault
-  where
-    explore is control =
-
-      -- ALERT!!! Impure code: readRaces must be called *after* we have
-      -- finished with trace.
-      let (readRaces,trace) = detachTraceRaces $
-                                detectLoopsSimTrace 100000 $
-                                  controlSimTrace control mainAction
-      in (counterexample ("Schedule control: " ++ show control) $ k trace) .&&.
-         case is of
-           [] -> property True
-           (i:is') ->
-             let races     = filter (not . cached) $ readRaces()
-                 r         = races !! i
-             in --Debug.trace "New schedule:" $
-                --Debug.trace ("  "++show r) $
-                counterexample ("Schedule control: " ++ show r) $
-                explore is' r
-    -- It is possible for the same control to be generated several times.
-    -- To avoid exploring them twice, we keep a cache of explored schedules.
-    cache = unsafePerformIO $ newIORef $ Set.empty
-    cached m = unsafePerformIO $ atomicModifyIORef' cache $ \set ->
-      (Set.insert m set, Set.member m set)
-    -- cacheSize () = unsafePerformIO $ Set.size <$> readIORef cache
+      in property (k trace)
 
 -- Detect loops
 -- OBS! The timeout function used here does NOT count time spent on GC.
