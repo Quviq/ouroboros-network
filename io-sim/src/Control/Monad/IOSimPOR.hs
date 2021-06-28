@@ -61,6 +61,7 @@ import           Control.Monad.ST.Lazy
 import           Control.Monad.Class.MonadThrow as MonadThrow
 import           Control.Monad.Class.MonadTime
 
+import           Control.Monad.IOSim.Types
 import           Control.Monad.IOSimPOR.Internal
 import           Control.Monad.IOSimPOR.QuickCheckUtils
 
