@@ -26,11 +26,12 @@ source-repository head
 library
   hs-source-dirs:      src
   exposed-modules:     Control.Monad.IOSim,
-                       Control.Monad.IOSimPOR
+                       Control.Monad.IOSimPOR,
+                       Control.Monad.IOSim.Types
   other-modules:       Control.Monad.IOSim.Internal,
-                       Control.Monad.IOSim.Types,
                        Control.Monad.IOSimPOR.Internal
                        Control.Monad.IOSimPOR.QuickCheckUtils
+                       Control.Monad.IOSimPOR.Timeout
   default-language:    Haskell2010
   other-extensions:    BangPatterns,
                        CPP,
