@@ -69,11 +69,10 @@ import           Control.Monad.IOSimPOR.QuickCheckUtils
 import           Test.QuickCheck
 
 
---import           System.IO
 import           System.IO.Unsafe
 import           Control.Monad.IOSimPOR.Timeout
 import           Data.IORef
-import qualified Debug.Trace as Debug
+-- import qualified Debug.Trace as Debug
 
 
 selectTraceEvents
@@ -300,14 +299,14 @@ replaySimTrace mainAction control k =
                                   controlSimTrace control mainAction
       in k trace
 
-exploreSelectedSimTrace :: 
+exploreSelectedSimTrace ::
   forall a test. Testable test =>
     [Int] -> (forall s. IOSim s a) -> (Trace a -> test) -> Property
 exploreSelectedSimTrace is mainAction k =
   explore is ControlDefault
   where
     explore is control =
-    
+
       -- ALERT!!! Impure code: readRaces must be called *after* we have
       -- finished with trace.
       let (readRaces,trace) = detachTraceRaces $
@@ -328,7 +327,7 @@ exploreSelectedSimTrace is mainAction k =
     cache = unsafePerformIO $ newIORef $ Set.empty
     cached m = unsafePerformIO $ atomicModifyIORef' cache $ \set ->
       (Set.insert m set, Set.member m set)
-    cacheSize () = unsafePerformIO $ Set.size <$> readIORef cache
+    -- cacheSize () = unsafePerformIO $ Set.size <$> readIORef cache
 
 -- Detect loops
 -- OBS! The timeout function used here does NOT count time spent on GC.
@@ -342,6 +341,7 @@ detectLoopsSimTrace n trace = go trace
             Just (TraceRacesFound a t') -> TraceRacesFound a (go t')
             Just t'                     -> t'
 
-
-raceReversals ControlDefault = 0
+raceReversals :: ScheduleControl -> Int
+raceReversals ControlDefault      = 0
 raceReversals (ControlAwait mods) = length mods
+raceReversals ControlFollow{}     = error "Impossible: raceReversals ControlFollow{}"

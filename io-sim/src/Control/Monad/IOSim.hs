@@ -67,6 +67,8 @@ selectTraceEvents fn = go
     go (TraceMainException _ e _)       = throw (FailureException e)
     go (TraceDeadlock      _   threads) = throw (FailureDeadlock threads)
     go (TraceMainReturn    _ _ _)       = []
+    go TraceRacesFound{}                = error "Impossible: selectTraceEvents TraceRacesFound{}"
+    go TraceLoop{}                      = error "Impossible: selectTraceEvents TraceLoop{}"
 
 -- | Select all the traced values matching the expected type. This relies on
 -- the sim's dynamic trace facility.
@@ -156,6 +158,8 @@ traceResult strict = go
     go (TraceMainReturn _ x _)          = Right x
     go (TraceMainException _ e _)       = Left (FailureException e)
     go (TraceDeadlock   _   threads)    = Left (FailureDeadlock threads)
+    go TraceRacesFound{}                = error "Impossible: traceResult TraceRacesFound{}"
+    go TraceLoop{}                      = error "Impossible: traceResult TraceLoop{}"
 
 traceEvents :: Trace a -> [(Time, ThreadId, Maybe ThreadLabel, TraceEvent)]
 traceEvents (Trace time tid tlbl event t) = (time, tid, tlbl, event)
