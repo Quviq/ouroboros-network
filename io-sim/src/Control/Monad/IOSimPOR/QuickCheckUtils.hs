@@ -1,3 +1,5 @@
+{-# OPTIONS_GHC -Wno-name-shadowing #-}
+
 module Control.Monad.IOSimPOR.QuickCheckUtils where
 
 import Test.QuickCheck.Property

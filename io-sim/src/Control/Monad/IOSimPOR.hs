@@ -67,11 +67,10 @@ import           Control.Monad.IOSimPOR.QuickCheckUtils
 import           Test.QuickCheck
 
 
---import           System.IO
 import           System.IO.Unsafe
 import           System.Timeout
 import           Data.IORef
-import qualified Debug.Trace as Debug
+-- import qualified Debug.Trace as Debug
 
 
 selectTraceEvents
@@ -289,7 +288,7 @@ exploreSimTrace n mainAction k =
     -- debugging code
     traces :: IORef (Map.Map String [ScheduleControl])
     traces = unsafePerformIO $ newIORef $ Map.empty
-    addTrace :: Show a => ScheduleControl -> Trace a -> b -> b
+    addTrace :: ScheduleControl -> Trace a -> b -> b
     addTrace scheduleMod trace x = unsafePerformIO $ do
       atomicModifyIORef' traces $ \m -> (Map.insertWith (++) (show trace) [scheduleMod] m,())
       return x
@@ -301,14 +300,14 @@ exploreSimTrace n mainAction k =
                 | (tr,sm) <- Map.toList m]
         .&&. prop
 
-exploreSelectedSimTrace :: 
+exploreSelectedSimTrace ::
   forall a test. Testable test =>
     [Int] -> (forall s. IOSim s a) -> (Trace a -> test) -> Property
 exploreSelectedSimTrace is mainAction k =
   explore is ControlDefault
   where
     explore is control =
-    
+
       -- ALERT!!! Impure code: readRaces must be called *after* we have
       -- finished with trace.
       let (readRaces,trace) = detachTraceRaces $
@@ -329,7 +328,7 @@ exploreSelectedSimTrace is mainAction k =
     cache = unsafePerformIO $ newIORef $ Set.empty
     cached m = unsafePerformIO $ atomicModifyIORef' cache $ \set ->
       (Set.insert m set, Set.member m set)
-    cacheSize () = unsafePerformIO $ Set.size <$> readIORef cache
+    -- cacheSize () = unsafePerformIO $ Set.size <$> readIORef cache
 
 -- Detect loops
 detectLoopsSimTrace :: Int -> Trace a -> Trace a
@@ -341,5 +340,7 @@ detectLoopsSimTrace n trace = go trace
             Just (TraceRacesFound a t') -> TraceRacesFound a (go t')
             Just t'                     -> t'
 
+raceReversals :: ScheduleControl -> Int
 raceReversals ControlDefault = 0
 raceReversals (ControlAwait mods) = length mods
+raceReversals ControlFollow{}     = error "Impossible: raceReversals ControlFollow{}"
