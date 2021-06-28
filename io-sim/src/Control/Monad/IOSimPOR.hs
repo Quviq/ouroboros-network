@@ -15,6 +15,7 @@ module Control.Monad.IOSimPOR (
   runSimTrace,
   controlSimTrace,
   exploreSimTrace,
+  replaySimTrace,
   exploreSelectedSimTrace,
   ScheduleControl(..),
   runSimTraceST,
@@ -270,14 +271,16 @@ exploreSimTrace n mainAction k =
                 --counterexample ("Schedule control: " ++ show r) $
                 explore n' ((m-1) `max` 1) r
               | (r,n') <- zip races (divide (n-branching) branching) ]
-    bucket n | n<10 = show n
-    bucket n | n<50 = let n'=show (n `div` 10) in n'++"0-"++n'++"9"
-    bucket n        = buck 50
-      where buck low | n<2*low = show low++"-"++show (2*low-1)
-                     | otherwise = buck (2*low)
+
+    bucket n | n<10  = show n
+             | n>=10 = buck n 1
+    buck n t | n<10  = show (n*t) ++ "-" ++ show ((n+1)*t-1)
+             | n>=10 = buck (n `div` 10) (t*10)
+             
     divide n k =
       [ n `div` k + if i<n `mod` k then 1 else 0
       | i <- [0..k-1] ]
+      
     -- It is possible for the same control to be generated several times.
     -- To avoid exploring them twice, we keep a cache of explored schedules.
     cache = unsafePerformIO $ newIORef $
