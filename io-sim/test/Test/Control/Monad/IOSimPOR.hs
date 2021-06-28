@@ -4,7 +4,7 @@
 {-# LANGUAGE ScopedTypeVariables #-}
 {-# LANGUAGE LambdaCase #-}
 
-module JohnQC where
+module Test.Control.Monad.IOSimPOR where
 
 import Data.Time.Clock
 
@@ -14,6 +14,7 @@ import Control.Monad.Class.MonadSTM
 import Control.Monad.Class.MonadFork
 import Control.Monad.Class.MonadTimer
 import Control.Monad.Class.MonadTest
+import Control.Monad.Class.MonadThrow(catch)
 
 import GHC.Generics
 
@@ -22,7 +23,14 @@ import System.IO.Unsafe
 
 import Test.QuickCheck
 import Data.List
-import Control.Exception(try, SomeException)
+import Data.Map(Map)
+import qualified Data.Map as Map
+import Control.Exception(try, evaluate, SomeException)
+import Control.Monad.ST.Lazy
+import Control.Parallel
+import Data.IORef
+
+import qualified Debug.Trace as Debug
 
 data Step =
     WhenSet Int Int
@@ -91,10 +99,29 @@ newtype Tasks = Tasks [Task]
   deriving Show
 
 instance Arbitrary Tasks where
-  arbitrary = Tasks . fixThrowTos <$> arbitrary
-  shrink (Tasks ts) = Tasks . fixThrowTos <$> removeTask ts ++ shrink ts ++ advanceThrowTo ts ++ sortTasks ts
+  arbitrary = Tasks . fixThrowTos <$> scale (min 20) arbitrary
+  shrink (Tasks ts) = Tasks . fixThrowTos <$>
+         removeTask ts ++
+         shrink ts ++
+         shrinkDelays ts ++
+         advanceThrowTo ts ++
+         sortTasks ts
 
 fixThrowTos tasks = mapThrowTos (`mod` length tasks) tasks
+
+shrinkDelays tasks
+  | null times = []
+  | otherwise  = [map (Task . removeTime d) [steps | Task steps <- tasks]
+                 | d <- times]
+  where times = foldr union [] [scanl1 (+) [d | Delay d <- t] | Task t <- tasks]
+        removeTime 0 steps = steps
+        removeTime d []    = []
+        removeTime d (Delay d':steps)
+          | d==d' = steps
+          | d< d' = Delay (d'-d):steps
+          | d> d' = removeTime (d-d') steps
+        removeTime d (s:steps) =
+          s:removeTime d steps
 
 removeTask tasks =
   [ mapThrowTos (fixup i) . map (dontThrowTo i) $ take i tasks++drop (i+1) tasks
@@ -153,8 +180,8 @@ runTasks tasks = do
   exploreRaces
   ts <- mapM (interpret r t) tasks
   atomically $ writeTVar t ts
-  a  <- atomically $ readTVar r
   threadDelay 1000000000  -- allow the SUT threads to run
+  a  <- atomically $ readTVar r
   return (m,a)
 
 maxTaskValue (WhenSet m _:_) = m
@@ -169,23 +196,22 @@ propSimulates (Tasks tasks) =
 
 propExploration (Tasks tasks) =
   any (not . null . (\(Task steps)->steps)) tasks ==>
+    traceNoDuplicates $ \addTrace ->
+    --traceCounter $ \addTrace ->
     exploreSimTrace 100 (runTasks tasks) $ \trace ->
-    counterexample (show trace) $
+    --Debug.trace (("\nTrace:\n"++) . splitTrace . noExceptions $ show trace) $
+    addTrace trace $
+    counterexample (splitTrace . noExceptions $ show trace) $
     case traceResult False trace of
       Right (m,a) -> property $ m>=a
-      Left e      -> counterexample (show e) False
-
-testcase = Tasks [Task [ThrowTo 2,WhenSet 0 0],
-                  Task [],
-                  Task [WhenSet 1 0],
-                  Task [ThrowTo 1,
-                        ThrowTo 1,
-                        WhenSet 1 0,ThrowTo 2,WhenSet 0 0]]
-
+      Left e      -> counterexample (show e) False  
 
 -- Testing propPermutations n should collect every permutation of [1..n] once only.
+-- Test manually, and supply a small value of n.
 propPermutations n =
-  exploreSimTrace 1000 doit $ \trace ->
+  traceNoDuplicates $ \addTrace ->
+  exploreSimTrace 10000 doit $ \trace ->
+    addTrace trace $
     tabulate "Result" [noExceptions $ show $ traceResult False trace] $
       True
   where doit :: IOSim s [Int]
@@ -193,12 +219,32 @@ propPermutations n =
           r <- atomically $ newTVar []
           exploreRaces
           mapM_ (\i -> forkIO $ atomically $ modifyTVar r (++[i])) [1..n]
-          atomically $ do
-            is <- readTVar r
-            when (length is<n) retry
-            return is
+          threadDelay 1
+          atomically $ readTVar r
 
-noExceptions xs = unsafePerformIO $ try (evaluate e) >>= \case
+noExceptions xs = unsafePerformIO $ try (evaluate xs) >>= \case
   Right []     -> return []
   Right (x:ys) -> return (x:noExceptions ys)
-  Left e       -> return ("\n  "++show (e :: SomeException))
+  Left e       -> return ("\n"++show (e :: SomeException))
+
+splitTrace [] = []
+splitTrace (x:xs) | begins "(Trace" = "\n(" ++ splitTrace xs
+                  | otherwise       = x:splitTrace xs
+  where begins s = take (length s) (x:xs) == s
+
+traceCounter k = r `pseq` (k addTrace .&&.
+                           tabulate "Trace repetitions" (map show $ traceCounts ()) True)  
+  where
+    r = unsafePerformIO $ newIORef (Map.empty :: Map String Int)
+    addTrace t x = unsafePerformIO $ do
+      atomicModifyIORef r (\m->(Map.insertWith (+) (show t) 1 m,()))
+      return x
+    traceCounts () = unsafePerformIO $ Map.elems <$> readIORef r
+
+traceNoDuplicates k = r `pseq` (k addTrace .&&. maximum (traceCounts ()) == 1)
+  where
+    r = unsafePerformIO $ newIORef (Map.empty :: Map String Int)
+    addTrace t x = unsafePerformIO $ do
+      atomicModifyIORef r (\m->(Map.insertWith (+) (show t) 1 m,()))
+      return x
+    traceCounts () = unsafePerformIO $ Map.elems <$> readIORef r
