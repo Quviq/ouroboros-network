@@ -69,7 +69,7 @@ import           Test.QuickCheck
 
 --import           System.IO
 import           System.IO.Unsafe
-import           System.Timeout
+import           Control.Monad.IOSimPOR.Timeout
 import           Data.IORef
 import qualified Debug.Trace as Debug
 
@@ -332,6 +332,8 @@ exploreSelectedSimTrace is mainAction k =
     cacheSize () = unsafePerformIO $ Set.size <$> readIORef cache
 
 -- Detect loops
+-- OBS! The timeout function used here does NOT count time spent on GC.
+--      If it did, timeouts would strike at random.
 detectLoopsSimTrace :: Int -> Trace a -> Trace a
 detectLoopsSimTrace n trace = go trace
   where go t =
