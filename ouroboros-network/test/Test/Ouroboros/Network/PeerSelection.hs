@@ -22,11 +22,14 @@ import           Data.Maybe (listToMaybe)
 import           Data.Set (Set)
 import qualified Data.Set as Set
 import           Data.Void (Void)
+import           Data.Map(Map)
+import qualified Data.Map as Map
 
 import           Control.Applicative
 import           Control.Exception --(SomeException)
 import           Control.Monad.Class.MonadTime
 import           Control.Tracer (Tracer (..))
+import           Control.Monad.IOSim.Types
 
 import qualified Network.DNS as DNS (defaultResolvConf)
 import           Network.Socket (SockAddr)
@@ -43,6 +46,11 @@ import           Test.Ouroboros.Network.PeerSelection.Instances
 import qualified Test.Ouroboros.Network.PeerSelection.LocalRootPeers
 import           Test.Ouroboros.Network.PeerSelection.MockEnvironment hiding (tests)
 import qualified Test.Ouroboros.Network.PeerSelection.MockEnvironment
+import           Test.Ouroboros.Network.PeerSelection.PeerGraph
+import           Test.Ouroboros.Network.PeerSelection.Script
+import           Ouroboros.Network.PeerSelection.LocalRootPeers (LocalRootPeers(..))
+import           Ouroboros.Network.PeerSelection.Types
+
 
 import           Test.QuickCheck
 import           Test.Tasty (TestTree, testGroup)
@@ -52,6 +60,7 @@ import           Text.Pretty.Simple
 import           System.IO
 import           System.IO.Unsafe(unsafePerformIO)
 import           System.Timeout
+import           Data.IORef
 import qualified Debug.Trace as Debug
 
 
@@ -116,7 +125,7 @@ prop_governor_nolivelock env =
     check_governor_nolivelock env (runGovernorInMockEnvironment env)
 
 -- n is the number of alternative schedules to explore; specify, don't generate.
-prop_explore_governor_nolivelock :: Int -> GovernorMockEnvironment -> Property
+prop_explore_governor_nolivelock :: ExplorationSpec -> GovernorMockEnvironment -> Property
 prop_explore_governor_nolivelock n env =
     whenFail (pPrint env) $
     --within (10_000_000*(n+1)) $
@@ -168,7 +177,7 @@ check_governor_nolivelock env trace0 =
                         ++ "  env size:   " ++ show envSize ++ "\n"
                         -- ++ "  num events: " ++ show actual
                         ) $
-
+           whenFail (pPrint trace) $
            property (makesAdequateProgress maxevents timespan
                                            (map fst trace)))
                                            
@@ -268,7 +277,7 @@ prop_governor_gossip_1hr (GovernorMockEnvironmentWAD env@GovernorMockEnvironment
                  targetNumberOfActivePeers      = 0
                }
 
-prop_explore_governor_gossip_1hr :: Int -> GovernorMockEnvironmentWithoutAsyncDemotion -> Property
+prop_explore_governor_gossip_1hr :: ExplorationSpec -> GovernorMockEnvironmentWithoutAsyncDemotion -> Property
 prop_explore_governor_gossip_1hr n (GovernorMockEnvironmentWAD env@GovernorMockEnvironment{
                                      targets
                                     }) =
@@ -350,7 +359,7 @@ prop_governor_connstatus :: GovernorMockEnvironmentWithoutAsyncDemotion -> Prope
 prop_governor_connstatus (GovernorMockEnvironmentWAD env) =
   check_governor_connstatus (runGovernorInMockEnvironment env)
 
-prop_explore_governor_connstatus :: Int -> GovernorMockEnvironmentWithoutAsyncDemotion -> Property
+prop_explore_governor_connstatus :: ExplorationSpec -> GovernorMockEnvironmentWithoutAsyncDemotion -> Property
 prop_explore_governor_connstatus n (GovernorMockEnvironmentWAD env) =
   whenFail (pPrint env) $
   exploreGovernorInMockEnvironment n env check_governor_connstatus
@@ -389,7 +398,7 @@ check_governor_connstatus trace0 =
 {-
 -- Check the governor does not stop doing anything at all.
 -- Actually this is not true... the governor does nothing if there are no targets.
-prop_explore_governor_remains_active :: Int -> GovernorMockEnvironment -> Property
+prop_explore_governor_remains_active :: ExplorationSpec -> GovernorMockEnvironment -> Property
 prop_explore_governor_remains_active n env =
     whenFail (pPrint env) $
     --within (10_000_000*(n+1)) $
