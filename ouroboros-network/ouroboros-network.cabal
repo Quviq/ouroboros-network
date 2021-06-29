@@ -331,7 +331,8 @@ test-suite test
                        -Wno-unticked-promoted-constructors
                        -fno-ignore-asserts
                        -threaded
-                       +RTS -N -RTS
+                       -feager-blackholing 
+                       +RTS -N --nonmoving-gc -RTS
   if flag(ipv6)
     cpp-options:       -DOUROBOROS_NETWORK_IPV6
 
