@@ -55,6 +55,7 @@ import qualified Control.Monad.Fail as Fail
 import           Control.Tracer (Tracer (..), contramap, traceWith)
 
 import           Control.Monad.Class.MonadTimer hiding (timeout)
+import           Control.Monad.IOSim.Types(ExplorationOptions)
 import           Control.Monad.IOSimPOR
 
 import           Ouroboros.Network.PeerSelection.Governor hiding
@@ -190,12 +191,12 @@ governorAction mockEnv = do
     atomically retry  -- block to allow the governor to run
 
 exploreGovernorInMockEnvironment :: Testable test =>
-                                          Int
+                                          (ExplorationOptions->ExplorationOptions)
                                           -> GovernorMockEnvironment
                                           -> (Trace Void -> test)
                                           -> Property
-exploreGovernorInMockEnvironment n mockEnv k =
-    exploreSimTrace n (governorAction mockEnv) k
+exploreGovernorInMockEnvironment optsf mockEnv k =
+    exploreSimTrace optsf (governorAction mockEnv) k
 
 data TraceMockEnv = TraceEnvPeersStatus (Int, Map PeerAddr PeerStatus)
   deriving Show
