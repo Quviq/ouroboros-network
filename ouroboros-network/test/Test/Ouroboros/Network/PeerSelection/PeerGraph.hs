@@ -14,7 +14,7 @@ module Test.Ouroboros.Network.PeerSelection.PeerGraph (
     GossipScript,
     ConnectionScript,
     AsyncDemotion(..),
-    GossipTime,
+    GossipTime(..),
     interpretGossipTime,
 
     prop_arbitrary_PeerGraph,

@@ -19,7 +19,11 @@ module Test.Ouroboros.Network.PeerSelection.Script (
 
     -- * Pick scripts
     PickScript,
-    interpretPickScript
+    PickMembers(..),
+    interpretPickScript,
+
+    -- needed to write test cases
+    NonEmpty(..)
 
   ) where
 
