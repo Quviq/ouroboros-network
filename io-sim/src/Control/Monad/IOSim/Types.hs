@@ -527,6 +527,12 @@ data TraceEvent
   | EventTimerUpdated   TimeoutId        Time
   | EventTimerCancelled TimeoutId
   | EventTimerExpired   TimeoutId
+
+  -- the following events are inserted to mark the difference between
+  -- a failed trace and a similar passing trace of the same action
+  | EventThreadSleep                      -- the labelling thread was runnable,
+                                          -- but its execution was delayed
+  | EventThreadWake                       -- until this point
   deriving Show
 
 data ThreadId = ThreadId  [Int]

@@ -241,26 +241,36 @@ controlSimTrace control mainAction = runST (controlSimTraceST control mainAction
 exploreSimTrace ::
   forall a test. (Testable test, Show a) =>
     (ExplorationOptions->ExplorationOptions) ->
-    (forall s. IOSim s a) -> (Trace a -> test) -> Property
+    (forall s. IOSim s a) -> (Maybe (Trace a) -> Trace a -> test) -> Property
 exploreSimTrace optsf mainAction k =
   case explorationReplay opts of
     Nothing ->
-      explore (explorationScheduleBound opts) (explorationBranching opts) ControlDefault .&&.
+      explore (explorationScheduleBound opts) (explorationBranching opts) ControlDefault Nothing .&&.
       let size = cacheSize() in size `seq`
       tabulate "Modified schedules explored" [bucket size] True
     Just control ->
-      replaySimTrace mainAction control k
+      replaySimTrace opts mainAction control k
   where
     opts = optsf stdExplorationOptions
     
-    explore n m control =
+    explore n m control passingTrace =
 
       -- ALERT!!! Impure code: readRaces must be called *after* we have
       -- finished with trace.
-      let (readRaces,trace) = detachTraceRaces $
+      let (readRaces,trace0) = detachTraceRaces $
                                 detectLoopsSimTrace (explorationStepTimelimit opts) $ 
                                   controlSimTrace control mainAction
-      in (counterexample ("Schedule control: " ++ show control) $ k trace) .&&.
+          (sleeper,trace) = compareTraces passingTrace trace0
+      in (counterexample ("Schedule control: " ++ show control) $
+          counterexample (case sleeper of Nothing -> "No thread delayed"
+                                          Just ((t,tid,lab),racing) ->
+                                            showThread (tid,lab) ++
+                                            " delayed at time "++
+                                            show t ++
+                                            "\n  until after:\n" ++
+                                            unlines (map (("    "++).showThread) $ Set.toList racing)
+                                            ) $
+          k passingTrace trace) .&&.
          let limit     = (n+m-1) `div` m
              -- To ensure the set of schedules explored is deterministic, we filter out
              -- cached ones *after* selecting the children of this node.
@@ -273,7 +283,7 @@ exploreSimTrace optsf mainAction k =
               [ --Debug.trace "New schedule:" $
                 --Debug.trace ("  "++show r) $
                 --counterexample ("Schedule control: " ++ show r) $
-                explore n' ((m-1) `max` 1) r
+                explore n' ((m-1) `max` 1) r (Just trace0)
               | (r,n') <- zip races (divide (n-branching) branching) ]
 
     bucket n | n<10  = show n
@@ -284,6 +294,11 @@ exploreSimTrace optsf mainAction k =
     divide n k =
       [ n `div` k + if i<n `mod` k then 1 else 0
       | i <- [0..k-1] ]
+
+    showThread :: (ThreadId,Maybe ThreadLabel) -> String
+    showThread (tid,lab) =
+      show tid ++ (case lab of Nothing -> ""
+                               Just l  -> " ("++l++")")
       
     -- It is possible for the same control to be generated several times.
     -- To avoid exploring them twice, we keep a cache of explored schedules.
@@ -299,12 +314,16 @@ exploreSimTrace optsf mainAction k =
 
 replaySimTrace ::
   forall a test. (Testable test, Show a) =>
-    (forall s. IOSim s a) -> ScheduleControl -> (Trace a -> test) -> Property
-replaySimTrace mainAction control k =
+    ExplorationOptions ->
+    (forall s. IOSim s a) ->
+    ScheduleControl ->
+    (Maybe (Trace a) -> Trace a -> test) ->
+    Property
+replaySimTrace opts mainAction control k =
   let (readRaces,trace) = detachTraceRaces $
-                                detectLoopsSimTrace 2000000 $ 
+                                detectLoopsSimTrace (explorationStepTimelimit opts) $ 
                                   controlSimTrace control mainAction
-      in property (k trace)
+      in property (k Nothing trace)
 
 -- Detect loops
 -- OBS! The timeout function used here does NOT count time spent on GC.
@@ -322,3 +341,39 @@ raceReversals :: ScheduleControl -> Int
 raceReversals ControlDefault      = 0
 raceReversals (ControlAwait mods) = length mods
 raceReversals ControlFollow{}     = error "Impossible: raceReversals ControlFollow{}"
+
+-- compareTraces is given (maybe) a passing trace and a failing trace,
+-- and identifies the point at which they diverge, where it inserts a
+-- "sleep" event for the thread that is delayed in the failing case,
+-- and a "wake" event before its next action. It also returns the
+-- identity and time of the sleeping thread. Since we expect the trace
+-- to be consumed lazily (and perhaps only partially), and since the
+-- sleeping thread is not of interest unless the trace is consumed
+-- this far, then we collect its identity only if it is reached using
+-- unsafePerformIO.
+
+compareTraces Nothing trace = (Nothing, trace)
+compareTraces (Just passing) trace = unsafePerformIO $ do
+  sleeper <- newIORef Nothing
+  return (unsafePerformIO $ readIORef sleeper,
+          go sleeper passing trace)
+  where go sleeper (Trace tpass tidpass tlpass _ pass')
+           (Trace tfail tidfail tlfail evfail fail')
+          | (tpass,tidpass) == (tfail,tidfail) =
+              Trace tfail tidfail tlfail evfail $
+                go sleeper pass' fail'
+        go sleeper pass@(Trace tpass tidpass tlpass _ _) fail =
+          unsafePerformIO $ do
+            writeIORef sleeper $ Just ((tpass, tidpass, tlpass),Set.empty)
+            return $ Trace tpass tidpass tlpass EventThreadSleep $
+                       wakeup sleeper tidpass fail
+        go sleeper pass fail = fail
+        wakeup sleeper tidpass (Trace tfail tidfail tlfail evfail fail')
+          | tidpass == tidfail =
+              Trace tfail tidfail tlfail EventThreadWake fail'
+          | otherwise = unsafePerformIO $ do
+              Just (slp,racing) <- readIORef sleeper
+              writeIORef sleeper $ Just (slp,Set.insert (tidfail,tlfail) racing)
+              return $ Trace tfail tidfail tlfail evfail $
+                         wakeup sleeper tidpass fail'
+        wakeup sleeper tidpass fail = fail
