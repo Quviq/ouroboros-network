@@ -690,6 +690,7 @@ data ExplorationOptions = ExplorationOptions{
   }
   deriving Show
 
+stdExplorationOptions :: ExplorationOptions
 stdExplorationOptions = ExplorationOptions{
     explorationScheduleBound = 100,
     explorationBranching     = 3,
@@ -699,7 +700,14 @@ stdExplorationOptions = ExplorationOptions{
 
 type ExplorationSpec = ExplorationOptions -> ExplorationOptions
 
+withScheduleBound :: Int -> ExplorationSpec
 withScheduleBound n e = e{explorationScheduleBound = n}
-withBranching     n e = e{explorationBranching     = n}
+
+withBranching :: Int -> ExplorationSpec
+withBranching n e = e{explorationBranching = n}
+
+withStepTimelimit :: Int -> ExplorationSpec
 withStepTimelimit n e = e{explorationStepTimelimit = n}
-withReplay        r e = e{explorationReplay        = Just r}
+
+withReplay :: ScheduleControl -> ExplorationSpec
+withReplay r e = e{explorationReplay = Just r}

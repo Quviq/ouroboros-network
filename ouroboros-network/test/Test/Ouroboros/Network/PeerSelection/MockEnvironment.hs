@@ -56,7 +56,7 @@ import           Control.Tracer (Tracer (..), contramap, traceWith)
 
 import           Control.Monad.Class.MonadTimer hiding (timeout)
 import           Control.Monad.IOSim.Types(ExplorationOptions)
-import           Control.Monad.IOSimPOR
+import           Control.Monad.IOSim
 
 import           Ouroboros.Network.PeerSelection.Governor hiding
                      (PeerSelectionState (..))
@@ -380,7 +380,7 @@ mockPeerSelectionActions' tracer
         writeTVar snapshotSequenceNumber (sequenceNumber+1)
         snapshot <- takeSnapshot
         return (sequenceNumber, snapshot)
-      
+
 
 
 mockPeerSelectionPolicy  :: MonadSTM m

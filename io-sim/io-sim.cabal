@@ -26,7 +26,6 @@ source-repository head
 library
   hs-source-dirs:      src
   exposed-modules:     Control.Monad.IOSim,
-                       Control.Monad.IOSimPOR,
                        Control.Monad.IOSim.Types
   other-modules:       Control.Monad.IOSim.Internal,
                        Control.Monad.IOSimPOR.Internal
