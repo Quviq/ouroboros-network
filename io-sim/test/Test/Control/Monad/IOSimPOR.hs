@@ -10,6 +10,7 @@ import Data.Time.Clock
 
 import Control.Monad
 import Control.Monad.IOSimPOR
+import Control.Monad.IOSim.Types(withScheduleBound)
 import Control.Monad.Class.MonadSTM
 import Control.Monad.Class.MonadFork
 import Control.Monad.Class.MonadTimer
@@ -198,7 +199,7 @@ propExploration (Tasks tasks) =
   any (not . null . (\(Task steps)->steps)) tasks ==>
     traceNoDuplicates $ \addTrace ->
     --traceCounter $ \addTrace ->
-    exploreSimTrace 100 (runTasks tasks) $ \trace ->
+    exploreSimTrace id (runTasks tasks) $ \_ trace ->
     --Debug.trace (("\nTrace:\n"++) . splitTrace . noExceptions $ show trace) $
     addTrace trace $
     counterexample (splitTrace . noExceptions $ show trace) $
@@ -210,9 +211,10 @@ propExploration (Tasks tasks) =
 -- Test manually, and supply a small value of n.
 propPermutations n =
   traceNoDuplicates $ \addTrace ->
-  exploreSimTrace 10000 doit $ \trace ->
+  exploreSimTrace (withScheduleBound 10000) doit $ \_ trace ->
     addTrace trace $
-    tabulate "Result" [noExceptions $ show $ traceResult False trace] $
+    let Right result = traceResult False trace in
+    tabulate "Result" [noExceptions $ show $ result] $
       True
   where doit :: IOSim s [Int]
         doit = do
@@ -221,6 +223,8 @@ propPermutations n =
           mapM_ (\i -> forkIO $ atomically $ modifyTVar r (++[i])) [1..n]
           threadDelay 1
           atomically $ readTVar r
+
+ordered xs = and (zipWith (<) xs (drop 1 xs))
 
 noExceptions xs = unsafePerformIO $ try (evaluate xs) >>= \case
   Right []     -> return []
