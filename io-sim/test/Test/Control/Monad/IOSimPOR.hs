@@ -9,7 +9,7 @@ module Test.Control.Monad.IOSimPOR where
 import Data.Time.Clock
 
 import Control.Monad
-import Control.Monad.IOSimPOR
+import Control.Monad.IOSim
 import Control.Monad.IOSim.Types(withScheduleBound)
 import Control.Monad.Class.MonadSTM
 import Control.Monad.Class.MonadFork
@@ -72,7 +72,7 @@ instance Arbitrary TimeoutStep where
                     (3,AwaitTimeout)]
 
   shrink = genericShrink
-  
+
 
 newtype Task = Task [Step]
   deriving (Eq, Ord, Show)
@@ -205,7 +205,7 @@ propExploration (Tasks tasks) =
     counterexample (splitTrace . noExceptions $ show trace) $
     case traceResult False trace of
       Right (m,a) -> property $ m>=a
-      Left e      -> counterexample (show e) False  
+      Left e      -> counterexample (show e) False
 
 -- Testing propPermutations n should collect every permutation of [1..n] once only.
 -- Test manually, and supply a small value of n.
@@ -237,7 +237,7 @@ splitTrace (x:xs) | begins "(Trace" = "\n(" ++ splitTrace xs
   where begins s = take (length s) (x:xs) == s
 
 traceCounter k = r `pseq` (k addTrace .&&.
-                           tabulate "Trace repetitions" (map show $ traceCounts ()) True)  
+                           tabulate "Trace repetitions" (map show $ traceCounts ()) True)
   where
     r = unsafePerformIO $ newIORef (Map.empty :: Map String Int)
     addTrace t x = unsafePerformIO $ do
