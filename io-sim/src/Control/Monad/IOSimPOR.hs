@@ -1,9 +1,9 @@
 {-# LANGUAGE RankNTypes          #-}
 {-# LANGUAGE ScopedTypeVariables #-}
 
-{-# OPTIONS_GHC -Wno-name-shadowing #-}
+{-# OPTIONS_GHC -fno-warn-name-shadowing #-}
 
-module Control.Monad.IOSim (
+module Control.Monad.IOSimPOR (
   -- * Simulation monad
   IOSim,
   STMSim,
@@ -35,14 +35,6 @@ module Control.Monad.IOSim (
   selectTraceEventsSay,
   printTraceEventsSay,
   selectTraceRaces,
-  -- * Exploration options
-  ExplorationSpec,
-  ExplorationOptions,
-  stdExplorationOptions,
-  withScheduleBound,
-  withBranching,
-  withStepTimelimit,
-  withReplay,
   -- * Eventlog
   EventlogEvent(..),
   EventlogMarker(..),
@@ -69,8 +61,7 @@ import           Control.Monad.Class.MonadThrow as MonadThrow
 import           Control.Monad.Class.MonadTime
 
 import           Control.Monad.IOSim.Types
-import           Control.Monad.IOSim.Internal
-import           Control.Monad.IOSimPOR.Internal (controlSimTraceST)
+import           Control.Monad.IOSimPOR.Internal
 import           Control.Monad.IOSimPOR.QuickCheckUtils
 
 import           Test.QuickCheck
@@ -79,6 +70,7 @@ import           Test.QuickCheck
 import           System.IO.Unsafe
 import           Control.Monad.IOSimPOR.Timeout
 import           Data.IORef
+-- import qualified Debug.Trace as Debug
 
 
 selectTraceEvents
@@ -105,6 +97,13 @@ selectTraceRaces = go
       --Debug.trace ("Found "++show (length races) ++" races") $
       races ++ go trace
     go _                             = []
+
+removeTraceRaces :: Trace a -> Trace a
+removeTraceRaces = go
+  where
+    go (Trace a b c d trace)     = Trace a b c d $ go trace
+    go (TraceRacesFound _ trace) = go trace
+    go t                         = t
 
 -- Extracting races from a trace.  There is a subtlety in doing so: we
 -- must return a defined list of races even in the case where the
@@ -221,7 +220,7 @@ traceResult strict = go
     go (TraceMainReturn _ x _)          = Right x
     go (TraceMainException _ e _)       = Left (FailureException e)
     go (TraceDeadlock   _   threads)    = Left (FailureDeadlock threads)
-    go TraceLoop{}                      = error "Impossible: traceResult TraceLoop{}"
+    go TraceLoop{}                      = error "Impossible: traceResult _ TraceLoop{}"
 
 traceEvents :: Trace a -> [(Time, ThreadId, Maybe ThreadLabel, TraceEvent)]
 traceEvents (Trace time tid tlbl event t) = (time, tid, tlbl, event)
@@ -234,7 +233,7 @@ traceEvents _                             = []
 -- | See 'runSimTraceST' below.
 --
 runSimTrace :: forall a. (forall s. IOSim s a) -> Trace a
-runSimTrace mainAction = runST (runSimTraceST mainAction)
+runSimTrace mainAction = removeTraceRaces $ runST (runSimTraceST mainAction)
 
 controlSimTrace :: forall a. ScheduleControl -> (forall s. IOSim s a) -> Trace a
 controlSimTrace control mainAction = runST (controlSimTraceST control mainAction)
@@ -253,13 +252,13 @@ exploreSimTrace optsf mainAction k =
       replaySimTrace opts mainAction control k
   where
     opts = optsf stdExplorationOptions
-
+    
     explore n m control passingTrace =
 
       -- ALERT!!! Impure code: readRaces must be called *after* we have
       -- finished with trace.
       let (readRaces,trace0) = detachTraceRaces $
-                                detectLoopsSimTrace (explorationStepTimelimit opts) $
+                                detectLoopsSimTrace (explorationStepTimelimit opts) $ 
                                   controlSimTrace control mainAction
           (sleeper,trace) = compareTraces passingTrace trace0
       in (counterexample ("Schedule control: " ++ show control) $
@@ -291,7 +290,7 @@ exploreSimTrace optsf mainAction k =
              | n>=10 = buck n 1
     buck n t | n<10  = show (n*t) ++ "-" ++ show ((n+1)*t-1)
              | n>=10 = buck (n `div` 10) (t*10)
-
+             
     divide n k =
       [ n `div` k + if i<n `mod` k then 1 else 0
       | i <- [0..k-1] ]
@@ -300,7 +299,7 @@ exploreSimTrace optsf mainAction k =
     showThread (tid,lab) =
       show tid ++ (case lab of Nothing -> ""
                                Just l  -> " ("++l++")")
-
+      
     -- It is possible for the same control to be generated several times.
     -- To avoid exploring them twice, we keep a cache of explored schedules.
     cache = unsafePerformIO $ newIORef $
@@ -313,15 +312,16 @@ exploreSimTrace optsf mainAction k =
       (Set.insert m set, Set.member m set)
     cacheSize () = unsafePerformIO $ Set.size <$> readIORef cache
 
-replaySimTrace :: forall a test. (Testable test)
-               => ExplorationOptions
-               -> (forall s. IOSim s a)
-               -> ScheduleControl
-               -> (Maybe (Trace a) -> Trace a -> test)
-               -> Property
+replaySimTrace ::
+  forall a test. (Testable test, Show a) =>
+    ExplorationOptions ->
+    (forall s. IOSim s a) ->
+    ScheduleControl ->
+    (Maybe (Trace a) -> Trace a -> test) ->
+    Property
 replaySimTrace opts mainAction control k =
   let (readRaces,trace) = detachTraceRaces $
-                                detectLoopsSimTrace (explorationStepTimelimit opts) $
+                                detectLoopsSimTrace (explorationStepTimelimit opts) $ 
                                   controlSimTrace control mainAction
       in property (k Nothing trace)
 
@@ -352,11 +352,6 @@ raceReversals ControlFollow{}     = error "Impossible: raceReversals ControlFoll
 -- this far, then we collect its identity only if it is reached using
 -- unsafePerformIO.
 
-compareTraces :: Maybe (Trace a1)
-              -> Trace a2
-              -> (Maybe ((Time, ThreadId, Maybe ThreadLabel),
-                         Set.Set (ThreadId, Maybe ThreadLabel)),
-                  Trace a2)
 compareTraces Nothing trace = (Nothing, trace)
 compareTraces (Just passing) trace = unsafePerformIO $ do
   sleeper <- newIORef Nothing
