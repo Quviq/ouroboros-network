@@ -13,17 +13,20 @@ module Test.Ouroboros.Network.PeerSelection.MockEnvironment (
     GovernorMockEnvironment(..),
     GovernorMockEnvironmentWithoutAsyncDemotion(..),
     runGovernorInMockEnvironment,
+    exploreGovernorInMockEnvironment,
 
     TraceMockEnv(..),
     TestTraceEvent(..),
     selectGovernorEvents,
     selectPeerSelectionTraceEvents,
+    selectPeerSelectionTraceEventsUntil,
     firstGossipReachablePeers,
 
     module Test.Ouroboros.Network.PeerSelection.Script,
     module Ouroboros.Network.PeerSelection.Types,
 
     tests,
+    prop_shrinkCarefully_GovernorMockEnvironment
 
   ) where
 
@@ -43,10 +46,13 @@ import           Control.Monad.Class.MonadAsync
 import           Control.Monad.Class.MonadSTM
 import           Control.Monad.Class.MonadTime
 import           Control.Monad.Class.MonadThrow
+import           Control.Monad.Class.MonadFork
+import           Control.Monad.Class.MonadTest
 import qualified Control.Monad.Fail as Fail
 import           Control.Tracer (Tracer (..), contramap, traceWith)
 
 import           Control.Monad.Class.MonadTimer hiding (timeout)
+import           Control.Monad.IOSim.Types(ExplorationOptions)
 import           Control.Monad.IOSim
 
 import           Ouroboros.Network.PeerSelection.Governor hiding
@@ -60,11 +66,13 @@ import           Test.Ouroboros.Network.PeerSelection.Script
 import           Test.Ouroboros.Network.PeerSelection.PeerGraph
 import           Test.Ouroboros.Network.PeerSelection.LocalRootPeers
                    as LocalRootPeers hiding (tests)
+import           Test.Ouroboros.Network.ShrinkCarefully
 
 import           Test.QuickCheck
 import           Test.QuickCheck.Utils
 import           Test.Tasty (TestTree, localOption, testGroup)
 import           Test.Tasty.QuickCheck (QuickCheckMaxSize (..), testProperty)
+import qualified Debug.Trace as Debug
 
 
 tests :: TestTree
@@ -81,6 +89,8 @@ tests =
       , testProperty "arbitrary for GovernorMockEnvironment" prop_arbitrary_GovernorMockEnvironment
       , localOption (QuickCheckMaxSize 30) $
         testProperty "shrink for GovernorMockEnvironment"    prop_shrink_GovernorMockEnvironment
+      , testProperty "shrink GovernorMockEnvironment carefully"
+                                                             prop_shrinkCarefully_GovernorMockEnvironment
       ]
     ]
 
@@ -164,9 +174,14 @@ validGovernorMockEnvironment GovernorMockEnvironment {
 --
 runGovernorInMockEnvironment :: GovernorMockEnvironment -> Trace Void
 runGovernorInMockEnvironment mockEnv =
-    runSimTrace $ do
-      policy  <- mockPeerSelectionPolicy                mockEnv
-      actions <- mockPeerSelectionActions tracerMockEnv mockEnv policy
+    runSimTrace $ governorAction mockEnv
+
+governorAction :: GovernorMockEnvironment -> IOSim s Void
+governorAction mockEnv = do
+    policy  <- mockPeerSelectionPolicy                mockEnv
+    actions <- mockPeerSelectionActions tracerMockEnv mockEnv policy
+    exploreRaces      -- explore races within the governor
+    forkIO $ do       -- races with the governor should be explored
       peerSelectionGovernor
         tracerTracePeerSelection
         tracerDebugPeerSelection
@@ -174,6 +189,16 @@ runGovernorInMockEnvironment mockEnv =
         (mkStdGen 42)
         actions
         policy
+      atomically retry
+    atomically retry  -- block to allow the governor to run
+
+exploreGovernorInMockEnvironment :: Testable test =>
+                                          (ExplorationOptions->ExplorationOptions)
+                                          -> GovernorMockEnvironment
+                                          -> (Maybe (Trace Void) -> Trace Void -> test)
+                                          -> Property
+exploreGovernorInMockEnvironment optsf mockEnv k =
+    exploreSimTrace optsf (governorAction mockEnv) k
 
 data TraceMockEnv = TraceEnvAddPeers       PeerGraph
                   | TraceEnvSetLocalRoots  (LocalRootPeers PeerAddr)
@@ -219,10 +244,10 @@ mockPeerSelectionActions tracer
     traceWith tracer (TraceEnvAddPeers peerGraph)
     traceWith tracer (TraceEnvSetLocalRoots localRootPeers)   --TODO: make dynamic
     traceWith tracer (TraceEnvSetPublicRoots publicRootPeers) --TODO: make dynamic
-    snapshot <- atomically (snapshotPeersStatus peerConns)
-    traceWith tracer (TraceEnvPeersStatus snapshot)
+    snapshotSequenceNumber <- atomically $ newTVar 0
+    --    traceWith tracer (TraceEnvPeersStatus snapshot) ?
     return $ mockPeerSelectionActions'
-               tracer env policy
+               tracer snapshotSequenceNumber env
                scripts targetsVar peerConns
 
 
@@ -238,6 +263,7 @@ mockPeerSelectionActions' :: forall m.
                              (MonadAsync m, MonadSTM m, MonadTimer m, Fail.MonadFail m,
                               MonadThrow (STM m))
                           => Tracer m TraceMockEnv
+                          -> TVar m Int
                           -> GovernorMockEnvironment
                           -> PeerSelectionPolicy PeerAddr m
                           -> Map PeerAddr (TVar m GossipScript, TVar m ConnectionScript)
@@ -245,6 +271,7 @@ mockPeerSelectionActions' :: forall m.
                           -> TVar m (Map PeerAddr (TVar m PeerStatus))
                           -> PeerSelectionActions PeerAddr (PeerConn m) m
 mockPeerSelectionActions' tracer
+                          snapshotSequenceNumber
                           GovernorMockEnvironment {
                             localRootPeers,
                             publicRootPeers
@@ -305,7 +332,7 @@ mockPeerSelectionActions' tracer
         conns <- readTVar connsVar
         let !conns' = Map.insert peeraddr conn conns
         writeTVar connsVar conns'
-        snapshot <- snapshotPeersStatus connsVar
+        snapshot <- withSequenceNumber $ traverse readTVar conns'
         return (PeerConn peeraddr conn, snapshot)
       traceWith tracer (TraceEnvPeersStatus snapshot)
       let Just (_, connectScript) = Map.lookup peeraddr scripts
@@ -357,7 +384,7 @@ mockPeerSelectionActions' tracer
     activatePeerConnection :: PeerConn m -> m ()
     activatePeerConnection (PeerConn _peeraddr conn) = do
       threadDelay 1
-      snapshot <- atomically $ do
+      snapshot <- atomically $ withSequenceNumber $ do
         status <- readTVar conn
         case status of
           PeerHot  -> error "activatePeerConnection of hot peer"
@@ -377,7 +404,7 @@ mockPeerSelectionActions' tracer
 
     deactivatePeerConnection :: PeerConn m -> m ()
     deactivatePeerConnection (PeerConn _peeraddr conn) = do
-      snapshot <- atomically $ do
+      snapshot <- atomically $ withSequenceNumber $ do
         status <- readTVar conn
         case status of
           PeerHot  -> writeTVar conn PeerWarm
@@ -391,7 +418,7 @@ mockPeerSelectionActions' tracer
 
     closePeerConnection :: PeerConn m -> m ()
     closePeerConnection (PeerConn peeraddr conn) = do
-      snapshot <- atomically $ do
+      snapshot <- atomically $ withSequenceNumber $ do
         status <- readTVar conn
         case status of
           PeerHot  -> writeTVar conn PeerCold
@@ -406,6 +433,13 @@ mockPeerSelectionActions' tracer
 
     monitorPeerConnection :: PeerConn m -> STM m PeerStatus
     monitorPeerConnection (PeerConn _peeraddr conn) = readTVar conn
+
+    withSequenceNumber takeSnapshot = do
+        sequenceNumber <- readTVar snapshotSequenceNumber
+        writeTVar snapshotSequenceNumber (sequenceNumber+1)
+        snapshot <- takeSnapshot
+        return (sequenceNumber, snapshot)
+
 
 
 snapshotPeersStatus :: MonadSTMTx stm
@@ -490,9 +524,28 @@ selectPeerSelectionTraceEvents = go
     go (Trace t _ _ (EventLog e) trace)
      | Just x <- fromDynamic e    = (t,x) : go trace
     go (Trace _ _ _ _ trace)      =         go trace
+    go (TraceRacesFound _ trace)  =         go trace
     go (TraceMainException _ e _) = throw e
     go (TraceDeadlock      _   _) = [] -- expected result in many cases
     go (TraceMainReturn    _ _ _) = []
+
+selectPeerSelectionTraceEventsUntil :: Time -> Trace a -> [(Time, TestTraceEvent)]
+selectPeerSelectionTraceEventsUntil tmax = go
+  where
+    go (Trace t _ _ e _)
+     | t > tmax                   = --Debug.trace ("Stopping at "++show t++", after "++show e)
+                                    []
+    go (Trace t _ _ (EventLog e) trace)
+     | Just x <- fromDynamic e    = (t,x) : go trace
+    go (Trace t _ _ (EventTimerExpired tmid) trace)
+                                  = --Debug.trace ("Timer "++show tmid++" expired at "++show t) $
+                                            go trace
+    go (Trace _ _ _ _ trace)      =         go trace
+    go (TraceRacesFound _ trace)  =         go trace
+    go (TraceMainException _ e _) = throw e
+    go (TraceDeadlock      _   _) = [] -- expected result in many cases
+    go (TraceMainReturn    _ _ _) = []
+    go TraceLoop                  = error "Infinite loop"
 
 selectGovernorEvents :: [(Time, TestTraceEvent)]
                      -> [(Time, TracePeerSelection PeerAddr)]
@@ -634,3 +687,6 @@ prop_shrink_GovernorMockEnvironment x =
       prop_shrink_valid validGovernorMockEnvironment x
  .&&. prop_shrink_nonequal x
 
+prop_shrinkCarefully_GovernorMockEnvironment ::
+  ShrinkCarefully GovernorMockEnvironment -> Property
+prop_shrinkCarefully_GovernorMockEnvironment = prop_shrinkCarefully
