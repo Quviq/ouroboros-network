@@ -211,13 +211,14 @@ propExploration (Tasks tasks) =
 -- Test manually, and supply a small value of n.
 propPermutations n =
   traceNoDuplicates $ \addTrace ->
-  exploreSimTrace (withScheduleBound 10000) doit $ \_ trace ->
+  exploreSimTrace (withScheduleBound 10000) (doit n) $ \_ trace ->
     addTrace trace $
     let Right result = traceResult False trace in
     tabulate "Result" [noExceptions $ show $ result] $
       True
-  where doit :: IOSim s [Int]
-        doit = do
+
+doit :: Int -> IOSim s [Int]
+doit n = do
           r <- atomically $ newTVar []
           exploreRaces
           mapM_ (\i -> forkIO $ atomically $ modifyTVar r (++[i])) [1..n]
