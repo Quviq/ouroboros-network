@@ -159,6 +159,7 @@ library
                        mtl,
                        nothunks,
                        network           >=3.1.2 && <3.2,
+                       pretty-simple,
                        psqueues          >=0.2.3 && <0.3,
                        serialise         >=0.2 && <0.3,
                        random,
@@ -185,6 +186,7 @@ library
                        -Wredundant-constraints
   if flag(asserts)
     ghc-options:       -fno-ignore-asserts
+
 
   -- Still in the lib for now as they're used in ouroboros-consensus.
   -- They should be moved to the separate test lib if they're still needed.
@@ -294,6 +296,7 @@ test-suite test
                        mtl,
                        network,
                        pipes,
+                       pretty-simple,
                        process,
                        psqueues,
                        random,
@@ -328,8 +331,11 @@ test-suite test
                        -Wno-unticked-promoted-constructors
                        -fno-ignore-asserts
                        -threaded
+                       -feager-blackholing 
+                       +RTS -N --nonmoving-gc -RTS
   if flag(ipv6)
     cpp-options:       -DOUROBOROS_NETWORK_IPV6
+
 
 test-suite cddl
   type:                exitcode-stdio-1.0

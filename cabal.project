@@ -36,6 +36,9 @@ package Win32-network
 package io-sim-classes
   flags: +asserts
 
+package io-sim
+  flags: +asserts
+
 package network-mux
   flags: +asserts
 
