@@ -124,13 +124,11 @@ prop_governor_nolivelock env =
     whenFail (pPrint env) $
     check_governor_nolivelock env Nothing (runGovernorInMockEnvironment env)
 
--- n is the number of alternative schedules to explore; specify, don't generate.
+-- Specify the exploration spec, don't generate. Use id for the defaults.
 prop_explore_governor_nolivelock :: ExplorationSpec -> GovernorMockEnvironment -> Property
-prop_explore_governor_nolivelock n env =
+prop_explore_governor_nolivelock opts env =
     whenFail (pPrint env) $
-    --within (10_000_000*(n+1)) $
-    --within 5000000 $
-    exploreGovernorInMockEnvironment n env $ check_governor_nolivelock env
+    exploreGovernorInMockEnvironment opts env $ check_governor_nolivelock env
 
 check_governor_nolivelock env _ trace0 =
     within 10000000 $
@@ -279,10 +277,10 @@ prop_governor_gossip_1hr (GovernorMockEnvironmentWAD env@GovernorMockEnvironment
                }
 
 prop_explore_governor_gossip_1hr :: ExplorationSpec -> GovernorMockEnvironmentWithoutAsyncDemotion -> Property
-prop_explore_governor_gossip_1hr n (GovernorMockEnvironmentWAD env@GovernorMockEnvironment{
+prop_explore_governor_gossip_1hr opts (GovernorMockEnvironmentWAD env@GovernorMockEnvironment{
                                      targets
                                     }) =
-    exploreGovernorInMockEnvironment n env { targets = singletonScript (targets', NoDelay) } $
+    exploreGovernorInMockEnvironment opts env { targets = singletonScript (targets', NoDelay) } $
     check_governor_gossip_1hr env
   where
     -- This test is only about testing gossiping,
@@ -362,9 +360,9 @@ prop_governor_connstatus (GovernorMockEnvironmentWAD env) =
   check_governor_connstatus Nothing (runGovernorInMockEnvironment env)
 
 prop_explore_governor_connstatus :: ExplorationSpec -> GovernorMockEnvironmentWithoutAsyncDemotion -> Property
-prop_explore_governor_connstatus n (GovernorMockEnvironmentWAD env) =
+prop_explore_governor_connstatus opts (GovernorMockEnvironmentWAD env) =
   whenFail (pPrint env) $
-  exploreGovernorInMockEnvironment n env check_governor_connstatus
+  exploreGovernorInMockEnvironment opts env check_governor_connstatus
 
 check_governor_connstatus _ trace0 = 
     let trace = takeFirstNHours 1

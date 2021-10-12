@@ -1,5 +1,5 @@
-How to use Control.Mond.IOSimPOR
-================================
+How to use Control.Monad.IOSimPOR
+=================================
 
 IOSimPOR is a version of IOSim that supports finding race conditions, by
 
@@ -40,6 +40,14 @@ test cases will not even have a possibility of provoking a fault,
 whatever the schedule; it usually makes more sense to explore a
 limited number of schedules each, for a large number of cases, than to
 explore a small number of cases very very thoroughly.
+
+Do not be surprised that tests run slowly. Each "test" is running (by
+default) 100 different schedules; each run is more costly than a run
+using vanilla IOSim, because race conditions and data dependencies
+need to be tracked. To reduce testing time, IOSimPOR explores
+alternative schedules in parallel, using as many cores as are
+available. Compile with -feager-blackholing, and run with +RTS -N -RTS
+on a many-core machine for fastest testing.
 
 The IOSimPOR API
 ----------------

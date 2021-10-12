@@ -332,7 +332,7 @@ test-suite test
                        -fno-ignore-asserts
                        -threaded
                        -feager-blackholing 
-                       +RTS -N --nonmoving-gc -RTS
+                       +RTS -N -RTS
   if flag(ipv6)
     cpp-options:       -DOUROBOROS_NETWORK_IPV6
 
