@@ -520,6 +520,7 @@ selectPeerSelectionTraceEvents = go
     go (TraceMainException _ e _) = throw e
     go (TraceDeadlock      _   _) = [] -- expected result in many cases
     go (TraceMainReturn    _ _ _) = []
+    go TraceLoop                  = error "Step time limit exceeded"
 
 selectPeerSelectionTraceEventsUntil :: Time -> Trace a -> [(Time, TestTraceEvent)]
 selectPeerSelectionTraceEventsUntil tmax = go
@@ -537,7 +538,7 @@ selectPeerSelectionTraceEventsUntil tmax = go
     go (TraceMainException _ e _) = throw e
     go (TraceDeadlock      _   _) = [] -- expected result in many cases
     go (TraceMainReturn    _ _ _) = []
-    go TraceLoop                  = error "Infinite loop"
+    go TraceLoop                  = error "Step time limit exceeded"
 
 selectGovernorEvents :: [(Time, TestTraceEvent)]
                      -> [(Time, TracePeerSelection PeerAddr)]

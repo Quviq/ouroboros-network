@@ -18,7 +18,7 @@ module Test.Ouroboros.Network.PeerSelection where
 
 import qualified Data.ByteString.Char8 as BS
 import           Data.Function (on)
-import           Data.List (groupBy, foldl', sort)
+import           Data.List (groupBy, foldl', sort, isPrefixOf)
 import           Data.Maybe (listToMaybe, isNothing, fromMaybe)
 import           Data.Set (Set)
 import qualified Data.Set as Set
@@ -122,6 +122,7 @@ tests =
   , testProperty "governor gossip reachable in 1hr" prop_governor_gossip_1hr
   , testProperty "governor connection status"       prop_governor_connstatus
   , testProperty "governor no livelock"             prop_governor_nolivelock
+  , testProperty "governor no livelock (racing)"    prop_explore_governor_nolivelock
   ]
   --TODO: We should add separate properties to check that we do not overshoot
   -- our targets: known peers from below can overshoot, but all the others
@@ -208,124 +209,6 @@ hasOutput :: GovernorMockEnvironment
 hasOutput _   (_:_) = True
 hasOutput env []    = isEmptyEnv env
 
-{-
--- This uses static targets and root peers.
---
--- TODO: Reenable this testcase.
-
-prop_governor_shrinks :: GovernorMockEnvironment -> Property
-prop_governor_shrinks env =
-  --within 10000000 $
-  property $
-  length (show $ shrink env) >= 0
-  
-prop_governor_nolivelock :: GovernorMockEnvironment -> Property
-prop_governor_nolivelock env =
-    whenFail (pPrint env) $
-    check_governor_nolivelock env Nothing (runGovernorInMockEnvironment env)
-
--- Specify the exploration spec, don't generate. Use id for the defaults.
-prop_explore_governor_nolivelock :: ExplorationSpec -> GovernorMockEnvironment -> Property
-prop_explore_governor_nolivelock opts env =
-    whenFail (pPrint env) $
-    exploreGovernorInMockEnvironment opts env $ check_governor_nolivelock env
-
-check_governor_nolivelock env _ trace0 =
-    within 10000000 $
-    property $
-    let trace = selectGovernorEvents $
-                trace1
-        trace1 =
-                takeFirstNHoursPeerSelectionTraceEvents 24 $
-                  trace0
-
-     in
-{-
-       -- uncomment to check expected distribution
-       tabulate  "env size"   [renderRanges 10 envSize] $
-       tabulate  "max events" [renderRanges 10 (maxEvents 5 trace)] $
-       tabulate  "events/graph ratio"
-                 [show (maxEvents 5 trace `div` envSize)] $
--}
-       hasOutput trace
-
-       -- Check we don't fall into a repeating cycle of events
-       -- (up to six events repeated exactly).
-{- .&&. case lookForLoops trace of
-         Nothing -> property True
-         Just (pref,loop) ->
-           counterexample "Looping!" $
-           whenFail (pPrint pref) $
-           counterexample "Entering loop:" $
-           whenFail (pPrint loop) $
-           property False
--}
-
-       -- Check we don't get too many events within a given time span.
-       -- How many events is too many? It scales with the graph size.
-       -- The ratio between them is from experimental evidence.
-  .&&. ( -- tolerate the infinite loop bug we know about
-        looping 2 trace .||.
-
-        let maxevents = (2+envSize) * 8 -- ratio from experiments
-            timespan  = 5               -- seconds
-            actual    = maxEvents (floor timespan) trace
-        in counterexample ("Too many events in a span of time!\n"
-                        ++ "  time span:  " ++ show timespan ++ " seconds\n"
-                        ++ "  env size:   " ++ show envSize ++ "\n"
-                        -- the next line can provoke an infinite loop
-                        -- ++ "  num events: " ++ show actual
-                        ) $
-           whenFail (pPrint trace) $
-           property (makesAdequateProgress maxevents timespan
-                                           (map fst trace)))
-                                           
-  where
-    hasOutput :: [(Time, TracePeerSelection PeerAddr)] -> Property
-    hasOutput (_:_) = property True
-    hasOutput []    = counterexample "no trace output" $
-                      property (isEmptyEnv env)
-
-    lookForLoops [] = empty
-    lookForLoops xs@(x:xs') =
-      foldr (<|>)
-        (do (pref,loop) <- lookForLoops xs'; return (x:pref,loop))
-        [return ([],take i xs) | i <- [1..6], take 100 xs == take 100 (drop i xs)]
-
-    looping n []     = False
-    looping n (x:xs) = take 100 (x:xs) == take 100 (drop (n-1) xs) || looping n xs
-
-    envSize         = length g + length (targets env)
-                        where PeerGraph g = peerGraph env
-    maxEvents n     = maximum
-                    . (0:)
-                    . map length
-                    . timeSpans n
-
-    timeSpans :: Int -> [(Time, a)] -> [[(Time, a)]]
-    timeSpans _ []           = []
-    timeSpans n (x@(t,_):xs) =
-      let (xs', xs'') = span (\(t',_) -> t' <= addTime (fromIntegral n) t) xs
-       in (x:xs') : timeSpans n xs''
-
--- Consume a list in property
-consumeTrace (x:xs) = do putStr "_"; hFlush stdout; consumeTrace xs
-consumeTrace []     = do putStrLn "done!"; return True
-
-
--- To check for loops, we need Eq instances, including for
--- SomeException! Perhaps these should be available more generally.
-
--- An orphan instance, needed to derive Eq TracePeerSelection. Nicer
--- would be to wrap SomeException in a newtype and use that in
--- TracePeerSelection instead... but this could be a lot of work.
-
-instance Eq SomeException where 
-  e == e' = show e == show e'
-
-deriving instance Eq a => Eq (TracePeerSelection a)
--}
-
 isEmptyEnv :: GovernorMockEnvironment -> Bool
 isEmptyEnv GovernorMockEnvironment {
              localRootPeers,
@@ -370,14 +253,25 @@ prop_governor_nofail env =
 --
 prop_governor_nolivelock :: GovernorMockEnvironment -> Property
 prop_governor_nolivelock env =
-    check_governor_nolivelock $ runGovernorInMockEnvironment env
+    check_governor_nolivelock 5000 $ runGovernorInMockEnvironment env
 
-prop_explore_governor_nolivelock :: ExplorationSpec -> GovernorMockEnvironment -> Property
-prop_explore_governor_nolivelock spec env =
-    exploreGovernorInMockEnvironment spec env $ const check_governor_nolivelock
+prop_explore_governor_nolivelock :: GovernorMockEnvironment -> Property
+prop_explore_governor_nolivelock =
+    prop'_explore_governor_nolivelock id
+    
+prop'_explore_governor_nolivelock :: ExplorationSpec -> GovernorMockEnvironment -> Property
+prop'_explore_governor_nolivelock spec env =
+    -- Simulation steps take longer and longer as simulated time
+    -- advances; we limit the test to 1000 governor events to avoid
+    -- hitting the simulator's step time limit. This may be because the
+    -- governor becomes slower, or because IOSimPOR's data structures
+    -- grow. 
+    exploreGovernorInMockEnvironment spec env $ \_ trace ->
+      counterexample (showTrace trace) $
+      check_governor_nolivelock 1000 trace
 
-check_governor_nolivelock trace0 =
-    let trace = take 5000 .
+check_governor_nolivelock n trace0 =
+    let trace = take n .
                 selectGovernorEvents .
                 selectPeerSelectionTraceEvents $
                   trace0
@@ -389,6 +283,11 @@ check_governor_nolivelock trace0 =
                "first 50 events: " ++ (unlines . map show . take 50 $ es)) $
             property False
 
+showTrace = break . show
+  where break s | "(Trace " `isPrefixOf` s = "\n" ++ breaks
+                | otherwise                = breaks
+         where breaks | null s    = []
+                      | otherwise = head s : break (tail s)
 
 -- | Scan the trace and return any occurrence where we have at least threshold
 -- events before virtual time moves on. Return the tail of the trace from that
