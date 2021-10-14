@@ -80,7 +80,6 @@ test-suite test
                        containers,
                        io-classes,
                        io-sim,
-                       io-sim-classes,
                        parallel,
                        QuickCheck,
                        tasty,

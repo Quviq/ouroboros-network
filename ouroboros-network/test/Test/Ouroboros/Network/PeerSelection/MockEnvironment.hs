@@ -244,10 +244,10 @@ mockPeerSelectionActions tracer
     traceWith tracer (TraceEnvAddPeers peerGraph)
     traceWith tracer (TraceEnvSetLocalRoots localRootPeers)   --TODO: make dynamic
     traceWith tracer (TraceEnvSetPublicRoots publicRootPeers) --TODO: make dynamic
-    snapshotSequenceNumber <- atomically $ newTVar 0
-    --    traceWith tracer (TraceEnvPeersStatus snapshot) ?
+    snapshot <- atomically (snapshotPeersStatus peerConns)
+    traceWith tracer (TraceEnvPeersStatus snapshot)
     return $ mockPeerSelectionActions'
-               tracer snapshotSequenceNumber env
+               tracer env policy
                scripts targetsVar peerConns
 
 
@@ -263,7 +263,6 @@ mockPeerSelectionActions' :: forall m.
                              (MonadAsync m, MonadSTM m, MonadTimer m, Fail.MonadFail m,
                               MonadThrow (STM m))
                           => Tracer m TraceMockEnv
-                          -> TVar m Int
                           -> GovernorMockEnvironment
                           -> PeerSelectionPolicy PeerAddr m
                           -> Map PeerAddr (TVar m GossipScript, TVar m ConnectionScript)
@@ -271,7 +270,6 @@ mockPeerSelectionActions' :: forall m.
                           -> TVar m (Map PeerAddr (TVar m PeerStatus))
                           -> PeerSelectionActions PeerAddr (PeerConn m) m
 mockPeerSelectionActions' tracer
-                          snapshotSequenceNumber
                           GovernorMockEnvironment {
                             localRootPeers,
                             publicRootPeers
@@ -332,7 +330,7 @@ mockPeerSelectionActions' tracer
         conns <- readTVar connsVar
         let !conns' = Map.insert peeraddr conn conns
         writeTVar connsVar conns'
-        snapshot <- withSequenceNumber $ traverse readTVar conns'
+        snapshot <- snapshotPeersStatus connsVar
         return (PeerConn peeraddr conn, snapshot)
       traceWith tracer (TraceEnvPeersStatus snapshot)
       let Just (_, connectScript) = Map.lookup peeraddr scripts
@@ -384,7 +382,7 @@ mockPeerSelectionActions' tracer
     activatePeerConnection :: PeerConn m -> m ()
     activatePeerConnection (PeerConn _peeraddr conn) = do
       threadDelay 1
-      snapshot <- atomically $ withSequenceNumber $ do
+      snapshot <- atomically $ do
         status <- readTVar conn
         case status of
           PeerHot  -> error "activatePeerConnection of hot peer"
@@ -404,7 +402,7 @@ mockPeerSelectionActions' tracer
 
     deactivatePeerConnection :: PeerConn m -> m ()
     deactivatePeerConnection (PeerConn _peeraddr conn) = do
-      snapshot <- atomically $ withSequenceNumber $ do
+      snapshot <- atomically $ do
         status <- readTVar conn
         case status of
           PeerHot  -> writeTVar conn PeerWarm
@@ -418,7 +416,7 @@ mockPeerSelectionActions' tracer
 
     closePeerConnection :: PeerConn m -> m ()
     closePeerConnection (PeerConn peeraddr conn) = do
-      snapshot <- atomically $ withSequenceNumber $ do
+      snapshot <- atomically $ do
         status <- readTVar conn
         case status of
           PeerHot  -> writeTVar conn PeerCold
@@ -433,12 +431,6 @@ mockPeerSelectionActions' tracer
 
     monitorPeerConnection :: PeerConn m -> STM m PeerStatus
     monitorPeerConnection (PeerConn _peeraddr conn) = readTVar conn
-
-    withSequenceNumber takeSnapshot = do
-        sequenceNumber <- readTVar snapshotSequenceNumber
-        writeTVar snapshotSequenceNumber (sequenceNumber+1)
-        snapshot <- takeSnapshot
-        return (sequenceNumber, snapshot)
 
 
 

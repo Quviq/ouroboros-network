@@ -25,8 +25,6 @@ import qualified Data.Set as Set
 import           Data.Map.Strict (Map)
 import qualified Data.Map.Strict as Map
 import           Data.Void (Void)
-import           Data.Map(Map)
-import qualified Data.Map as Map
 
 import qualified Data.Signal as Signal
 import           Data.Signal (Signal, Events, E(E), TS(TS))
@@ -38,7 +36,7 @@ import           Control.Applicative
 import           Control.Exception --(SomeException)
 import           Control.Monad.Class.MonadTime
 import           Control.Tracer (Tracer (..))
-import           Control.Monad.IOSim.Types
+import           Control.Monad.IOSim.Types hiding (STM)
 
 import qualified Network.DNS as DNS (defaultResolvConf)
 import           Network.Socket (SockAddr)
@@ -210,6 +208,7 @@ hasOutput :: GovernorMockEnvironment
 hasOutput _   (_:_) = True
 hasOutput env []    = isEmptyEnv env
 
+{-
 -- This uses static targets and root peers.
 --
 -- TODO: Reenable this testcase.
@@ -325,6 +324,7 @@ instance Eq SomeException where
   e == e' = show e == show e'
 
 deriving instance Eq a => Eq (TracePeerSelection a)
+-}
 
 isEmptyEnv :: GovernorMockEnvironment -> Bool
 isEmptyEnv GovernorMockEnvironment {
@@ -370,10 +370,17 @@ prop_governor_nofail env =
 --
 prop_governor_nolivelock :: GovernorMockEnvironment -> Property
 prop_governor_nolivelock env =
+    check_governor_nolivelock $ runGovernorInMockEnvironment env
+
+prop_explore_governor_nolivelock :: ExplorationSpec -> GovernorMockEnvironment -> Property
+prop_explore_governor_nolivelock spec env =
+    exploreGovernorInMockEnvironment spec env $ const check_governor_nolivelock
+
+check_governor_nolivelock trace0 =
     let trace = take 5000 .
                 selectGovernorEvents .
                 selectPeerSelectionTraceEvents $
-                  runGovernorInMockEnvironment env
+                  trace0
      in case tooManyEventsBeforeTimeAdvances 1000 trace of
           Nothing -> property True
           Just (t, es) ->
@@ -814,9 +821,9 @@ check_governor_connstatus _ trace0 =
           (Just envStatus, Nothing)        -> envStatus === Map.empty
       where
         lastEnvStatus =
-          fmap snd . listToMaybe . reverse . sort $
+          listToMaybe
             [ Map.filter (not . isPeerCold) status
-            | (_, MockEnvEvent (TraceEnvPeersStatus status)) <- trace ]
+            | (_, MockEnvEvent (TraceEnvPeersStatus status)) <- reverse trace ]
 
         isPeerCold PeerCold = True
         isPeerCold _        = False

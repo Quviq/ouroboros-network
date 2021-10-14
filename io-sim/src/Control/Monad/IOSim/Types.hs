@@ -326,23 +326,23 @@ instance MonadSTMTx (STM s) where
   newTQueue         = newTQueueDefault
   readTQueue        = readTQueueDefault
   tryReadTQueue     = tryReadTQueueDefault
+  peekTQueue        = peekTQueueDefault
+  tryPeekTQueue     = tryPeekTQueueDefault
   writeTQueue       = writeTQueueDefault
   isEmptyTQueue     = isEmptyTQueueDefault
 
   newTBQueue        = newTBQueueDefault
   readTBQueue       = readTBQueueDefault
   tryReadTBQueue    = tryReadTBQueueDefault
+  peekTBQueue       = peekTBQueueDefault
+  tryPeekTBQueue    = tryPeekTBQueueDefault
   flushTBQueue      = flushTBQueueDefault
   writeTBQueue      = writeTBQueueDefault
   lengthTBQueue     = lengthTBQueueDefault
   isEmptyTBQueue    = isEmptyTBQueueDefault
   isFullTBQueue     = isFullTBQueueDefault
 
-instance MonadLabelledSTMTx (STM s)
-                            (TVar s)
-                            (TMVarDefault   (IOSim s))
-                            (TQueueDefault  (IOSim s))
-                            (TBQueueDefault (IOSim s)) where
+instance MonadLabelledSTMTx (STM s) where
   labelTVar tvar label = STM $ \k -> LabelTVar label tvar (k ())
   labelTMVar   = labelTMVarDefault
   labelTQueue  = labelTQueueDefault
