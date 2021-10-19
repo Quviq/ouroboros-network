@@ -196,7 +196,10 @@ data SimState s a = SimState {
        races    :: Races,
        -- | control the schedule followed, and initial value
        control  :: !ScheduleControl,
-       control0 :: !ScheduleControl
+       control0 :: !ScheduleControl,
+       -- | limit on the computation time allowed per scheduling step, for
+       -- catching infinite loops etc
+       perStepTimeLimit :: !Int
 
      }
 
@@ -285,6 +288,8 @@ schedule thread@Thread{
       id --Debug.trace ("Performing action in step "++show s++"\n")
     _ -> id
   $
+  -- The next line forces the evaluation of action, which should be unevaluated up to
+  -- this point. This is where we actually *run* user code.
   case action of
 
     Return x -> case ctl of

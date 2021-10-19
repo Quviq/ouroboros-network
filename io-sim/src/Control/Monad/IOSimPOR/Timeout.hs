@@ -1,4 +1,4 @@
-module Control.Monad.IOSimPOR.Timeout ( Timeout, timeout ) where
+module Control.Monad.IOSimPOR.Timeout ( Timeout, timeout, unsafeTimeout ) where
 
 -- This module provides a timeout function like System.Timeout, BUT
 -- garbage collection time is not included (provided GHC stats are
@@ -13,6 +13,8 @@ import Control.Exception   (Exception(..), handleJust, bracket,
                             asyncExceptionFromException)
 import Data.Unique         (Unique, newUnique)
 import GHC.Stats
+import System.IO.Unsafe
+
 
 -- An internal type that is thrown as a dynamic exception to
 -- interrupt the running IO computation when the timeout has
@@ -54,3 +56,7 @@ waitFor n = do
     waitFor (t1-t0)
 
 getGCTime = fromIntegral . (`div` 1000) . gc_elapsed_ns <$> getRTSStats
+
+-- | unsafeTimeout n a forces the evaluation of a, with a time limit of n microseconds.
+unsafeTimeout :: Int -> a -> Maybe a
+unsafeTimeout n a = unsafePerformIO $ timeout n $ return $! a
