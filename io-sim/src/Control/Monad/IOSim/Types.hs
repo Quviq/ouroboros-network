@@ -681,7 +681,7 @@ instance Show ScheduleMod where
 data ExplorationOptions = ExplorationOptions{
     explorationScheduleBound :: Int,
     explorationBranching     :: Int,
-    explorationStepTimelimit :: Int,
+    explorationStepTimelimit :: Maybe Int,
     explorationReplay        :: Maybe ScheduleControl
   }
   deriving Show
@@ -690,7 +690,7 @@ stdExplorationOptions :: ExplorationOptions
 stdExplorationOptions = ExplorationOptions{
     explorationScheduleBound = 100,
     explorationBranching     = 3,
-    explorationStepTimelimit = 100000,
+    explorationStepTimelimit = Nothing,
     explorationReplay        = Nothing
     }
 
@@ -703,7 +703,7 @@ withBranching :: Int -> ExplorationSpec
 withBranching n e = e{explorationBranching = n}
 
 withStepTimelimit :: Int -> ExplorationSpec
-withStepTimelimit n e = e{explorationStepTimelimit = n}
+withStepTimelimit n e = e{explorationStepTimelimit = Just n}
 
 withReplay :: ScheduleControl -> ExplorationSpec
 withReplay r e = e{explorationReplay = Just r}

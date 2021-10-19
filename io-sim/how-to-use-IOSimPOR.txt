@@ -124,7 +124,8 @@ The options are:
    intended pure computations always finish well within that
    time. Note that garbage collection pauses are not included in the
    time limit (which would otherwise need to be considerably longer
-   than 100ms to accomodate them).
+   than 100ms to accomodate them), provided the -T flag is supplied to
+   the run-time system.
 
  - the schedule control to replay, default Nothing, set by
    withReplay. When a test fails, exploreSimTrace displays the

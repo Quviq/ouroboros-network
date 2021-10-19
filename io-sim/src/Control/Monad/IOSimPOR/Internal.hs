@@ -75,6 +75,8 @@ import           Control.Monad.Class.MonadTimer
 
 import           Control.Monad.IOSim.Types
 
+import           Control.Monad.IOSimPOR.Timeout(unsafeTimeout)
+
 -- import qualified Debug.Trace as Debug
 
 --
@@ -199,7 +201,7 @@ data SimState s a = SimState {
        control0 :: !ScheduleControl,
        -- | limit on the computation time allowed per scheduling step, for
        -- catching infinite loops etc
-       perStepTimeLimit :: !Int
+       perStepTimeLimit :: Maybe Int
 
      }
 
@@ -215,7 +217,8 @@ initialState =
       nextTmid = TimeoutId 0,
       races    = noRaces,
       control  = ControlDefault,
-      control0 = ControlDefault
+      control0 = ControlDefault,
+      perStepTimeLimit = Nothing
     }
   where
     epoch1970 = UTCTime (fromGregorian 1970 1 1) 0
@@ -262,7 +265,8 @@ schedule thread@Thread{
            clocks,
            nextVid, nextTmid,
            curTime  = time,
-           control
+           control,
+           perStepTimeLimit
          }
 
   | controlTargets (tid,tstep) control =
@@ -290,7 +294,9 @@ schedule thread@Thread{
   $
   -- The next line forces the evaluation of action, which should be unevaluated up to
   -- this point. This is where we actually *run* user code.
-  case action of
+  case maybe Just unsafeTimeout perStepTimeLimit action of
+   Nothing -> return TraceLoop
+   Just _  -> case action of
 
     Return x -> case ctl of
       MainFrame ->
@@ -926,11 +932,11 @@ lookupThreadLabel tid threads = join (threadLabel <$> Map.lookup tid threads)
 -- more convenient way is exposed by 'runSimTrace'.
 --
 runSimTraceST :: forall s a. IOSim s a -> ST s (Trace a)
-runSimTraceST mainAction = controlSimTraceST ControlDefault mainAction
+runSimTraceST mainAction = controlSimTraceST Nothing ControlDefault mainAction
 
-controlSimTraceST :: ScheduleControl -> IOSim s a -> ST s (Trace a)
-controlSimTraceST control mainAction =
-  schedule mainThread initialState{ control = control, control0 = control }
+controlSimTraceST :: Maybe Int -> ScheduleControl -> IOSim s a -> ST s (Trace a)
+controlSimTraceST limit control mainAction =
+  schedule mainThread initialState{ control = control, control0 = control, perStepTimeLimit = limit }
   where
     mainThread =
       Thread {

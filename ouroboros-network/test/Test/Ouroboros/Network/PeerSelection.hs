@@ -257,7 +257,7 @@ prop_governor_nolivelock env =
 
 prop_explore_governor_nolivelock :: GovernorMockEnvironment -> Property
 prop_explore_governor_nolivelock =
-    prop'_explore_governor_nolivelock id
+    prop'_explore_governor_nolivelock (withStepTimelimit 1000)
     
 prop'_explore_governor_nolivelock :: ExplorationSpec -> GovernorMockEnvironment -> Property
 prop'_explore_governor_nolivelock spec env =
@@ -268,7 +268,7 @@ prop'_explore_governor_nolivelock spec env =
     -- grow. 
     exploreGovernorInMockEnvironment spec env $ \_ trace ->
       counterexample (showTrace trace) $
-      check_governor_nolivelock 1000 trace
+      check_governor_nolivelock 5000 trace
 
 check_governor_nolivelock n trace0 =
     let trace = take n .

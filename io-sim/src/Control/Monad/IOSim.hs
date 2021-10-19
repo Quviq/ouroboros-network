@@ -236,8 +236,8 @@ traceEvents _                             = []
 runSimTrace :: forall a. (forall s. IOSim s a) -> Trace a
 runSimTrace mainAction = runST (runSimTraceST mainAction)
 
-controlSimTrace :: forall a. ScheduleControl -> (forall s. IOSim s a) -> Trace a
-controlSimTrace control mainAction = runST (controlSimTraceST control mainAction)
+controlSimTrace :: forall a. Maybe Int -> ScheduleControl -> (forall s. IOSim s a) -> Trace a
+controlSimTrace limit control mainAction = runST (controlSimTraceST limit control mainAction)
 
 exploreSimTrace ::
   forall a test. (Testable test, Show a) =>
@@ -259,8 +259,7 @@ exploreSimTrace optsf mainAction k =
       -- ALERT!!! Impure code: readRaces must be called *after* we have
       -- finished with trace.
       let (readRaces,trace0) = detachTraceRaces $
-                                detectLoopsSimTrace (explorationStepTimelimit opts) $
-                                  controlSimTrace control mainAction
+                                 controlSimTrace (explorationStepTimelimit opts) control mainAction
           (sleeper,trace) = compareTraces passingTrace trace0
       in (counterexample ("Schedule control: " ++ show control) $
           counterexample (case sleeper of Nothing -> "No thread delayed"
@@ -321,21 +320,8 @@ replaySimTrace :: forall a test. (Testable test)
                -> Property
 replaySimTrace opts mainAction control k =
   let (readRaces,trace) = detachTraceRaces $
-                                detectLoopsSimTrace (explorationStepTimelimit opts) $
-                                  controlSimTrace control mainAction
+                            controlSimTrace (explorationStepTimelimit opts) control mainAction
       in property (k Nothing trace)
-
--- Detect loops
--- OBS! The timeout function used here does NOT count time spent on GC.
---      If it did, timeouts would strike at random.
-detectLoopsSimTrace :: Int -> Trace a -> Trace a
-detectLoopsSimTrace n trace = go trace
-  where go t =
-          case unsafePerformIO $ timeout n $ return $! t of
-            Nothing                     -> TraceLoop
-            Just (Trace a b c d t')     -> Trace a b c d (go t')
-            Just (TraceRacesFound a t') -> TraceRacesFound a (go t')
-            Just t'                     -> t'
 
 raceReversals :: ScheduleControl -> Int
 raceReversals ControlDefault      = 0
