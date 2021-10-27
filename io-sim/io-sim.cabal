@@ -64,6 +64,7 @@ library
                        -Wredundant-constraints
                        -threaded
                        -rtsopts
+                       -feager-blackholing
                        +RTS -N -qn1 -RTS
   if flag(asserts)
      ghc-options:      -fno-ignore-asserts

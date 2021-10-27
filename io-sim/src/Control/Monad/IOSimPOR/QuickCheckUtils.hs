@@ -6,16 +6,14 @@ import Test.QuickCheck.Property
 import Test.QuickCheck.Gen
 import Control.Parallel
 
--- Take the conjunction of several properties, in parallel
--- This is a modification of code from Test.QuickCheck.Property,
--- to run non-IO properties in parallel.
+-- Take the conjunction of several properties, in parallel This is a
+-- modification of code from Test.QuickCheck.Property, to run non-IO
+-- properties in parallel. It also takes care NOT to label its result
+-- as an IO property (using IORose), unless one of its arguments is
+-- itself an IO property. This is needed to permit parallel testing.
 conjoinPar :: TestableNoCatch prop => [prop] -> Property
-conjoinPar ps =
-  againNoCatch $
-  MkProperty $
-  do roses <- mapM (fmap unProp . unProperty . propertyNoCatch) ps
-     return (MkProp $ conj id (speculate roses))
- where
+conjoinPar = conjoinSpeculate speculate
+  where
   -- speculation tries to evaluate each Rose tree in parallel, to WHNF
   -- This will not perform any IO, but should evaluate non-IO properties
   -- completely.
@@ -25,6 +23,19 @@ conjoinPar ps =
                     MkRose result _ -> let ans = maybe True id $ ok result in ans `pseq` rose
                     IORose _        -> rose
           roses' = speculate roses
+
+-- We also need a version of conjoin that is sequential, but does not
+-- label its result as an IO property unless one of its arguments
+-- is. Consequently it does not catch exceptions in its arguments.
+conjoinNoCatch :: TestableNoCatch prop => [prop] -> Property
+conjoinNoCatch = conjoinSpeculate id
+
+conjoinSpeculate spec ps =
+  againNoCatch $
+  MkProperty $
+  do roses <- mapM (fmap unProp . unProperty . propertyNoCatch) ps
+     return (MkProp $ conj id (spec roses))
+ where
           
   conj k [] =
     MkRose (k succeeded) []
@@ -54,15 +65,24 @@ conjoinPar ps =
         tables = tables result ++ tables r }
 
 -- |&&| is a replacement for .&&. that evaluates its arguments in
--- parallel. Importantly, |&&| does NOT label its result as an IO
--- property, unless one of its arguments is--which .&&. does. This
--- means that using .&&. inside an argument to conjoinPar limits
--- parallelism, while |&&| does not.
+-- parallel. |&&| does NOT label its result as an IO property, unless
+-- one of its arguments is--which .&&. does. This means that using
+-- .&&. inside an argument to conjoinPar limits parallelism, while
+-- |&&| does not.
 
 infixr 1 |&&|
 
 (|&&|) :: TestableNoCatch prop => prop -> prop -> Property
 p |&&| q = conjoinPar [p, q]
+
+-- .&&| is a sequential, but parallelism-friendly version of .&&., that
+-- tests its arguments in sequence, but does not label its result as
+-- an IO property unless one of its arguments is.
+
+infixr 1 .&&|
+(.&&|) :: TestableNoCatch prop => prop -> prop -> Property
+p .&&| q = conjoinNoCatch [p, q]
+
 
 -- property catches exceptions in its argument, turning everything
 -- Testable into an IORose property, which cannot be paralellized. We

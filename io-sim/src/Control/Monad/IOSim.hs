@@ -270,7 +270,7 @@ exploreSimTrace optsf mainAction k =
                                             "\n  until after:\n" ++
                                             unlines (map (("    "++).showThread) $ Set.toList racing)
                                             ) $
-          k passingTrace trace) .&&.
+          k passingTrace trace) .&&|
          let limit     = (n+m-1) `div` m
              -- To ensure the set of schedules explored is deterministic, we filter out
              -- cached ones *after* selecting the children of this node.
