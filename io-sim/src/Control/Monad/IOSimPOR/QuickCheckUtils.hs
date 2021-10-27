@@ -3,42 +3,47 @@
 module Control.Monad.IOSimPOR.QuickCheckUtils where
 
 import Test.QuickCheck.Property
+import Test.QuickCheck.Gen
 import Control.Parallel
 
 -- Take the conjunction of several properties, in parallel
--- This is a clone of code from Test.QuickCheck.Property,
--- modified to run non-IO properties in parallel.
-conjoinPar :: Testable prop => [prop] -> Property
+-- This is a modification of code from Test.QuickCheck.Property,
+-- to run non-IO properties in parallel.
+conjoinPar :: TestableNoCatch prop => [prop] -> Property
 conjoinPar ps =
-  again $
+  againNoCatch $
   MkProperty $
-  do roses <- mapM (fmap unProp . unProperty . property) ps
-     return (MkProp (conj id (speculate roses)))
+  do roses <- mapM (fmap unProp . unProperty . propertyNoCatch) ps
+     return (MkProp $ conj id (speculate roses))
  where
   -- speculation tries to evaluate each Rose tree in parallel, to WHNF
   -- This will not perform any IO, but should evaluate non-IO properties
   -- completely.
   speculate [] = []
-  speculate (rose:roses) = rose `par` speculate roses `par` (rose:roses)
-
+  speculate (rose:roses) = roses' `par` rose' `pseq` (rose':roses')
+    where rose' = case rose of
+                    MkRose result _ -> let ans = maybe True id $ ok result in ans `pseq` rose
+                    IORose _        -> rose
+          roses' = speculate roses
+          
   conj k [] =
     MkRose (k succeeded) []
 
-  conj k (p : ps) = IORose $ do
-    rose@(MkRose result _) <- reduceRose p
+  conj k (p : ps) = do
+    result <- p
     case ok result of
       _ | not (expect result) ->
-        return (return failed { reason = "expectFailure may not occur inside a conjunction" })
-      Just True -> return (conj (addLabels result . addCallbacksAndCoverage result . k) ps)
-      Just False -> return rose
+        return failed { reason = "expectFailure may not occur inside a conjunction" }
+      Just True -> conj (addLabels result . addCallbacksAndCoverage result . k) ps
+      Just False -> p
       Nothing -> do
-        rose2@(MkRose result2 _) <- reduceRose (conj (addCallbacksAndCoverage result . k) ps)
-        return $
-          -- Nasty work to make sure we use the right callbacks
-          case ok result2 of
-            Just True -> MkRose (result2 { ok = Nothing }) []
-            Just False -> rose2
-            Nothing -> rose2
+        let rest = conj (addCallbacksAndCoverage result . k) ps
+        result2 <- rest
+        -- Nasty work to make sure we use the right callbacks
+        case ok result2 of
+          Just True -> MkRose (result2 { ok = Nothing }) []
+          Just False -> rest
+          Nothing -> rest
 
   addCallbacksAndCoverage result r =
     r { callbacks = callbacks result ++ callbacks r,
@@ -47,3 +52,45 @@ conjoinPar ps =
     r { labels = labels result ++ labels r,
         classes = classes result ++ classes r,
         tables = tables result ++ tables r }
+
+-- |&&| is a replacement for .&&. that evaluates its arguments in
+-- parallel. Importantly, |&&| does NOT label its result as an IO
+-- property, unless one of its arguments is--which .&&. does. This
+-- means that using .&&. inside an argument to conjoinPar limits
+-- parallelism, while |&&| does not.
+
+infixr 1 |&&|
+
+(|&&|) :: TestableNoCatch prop => prop -> prop -> Property
+p |&&| q = conjoinPar [p, q]
+
+-- property catches exceptions in its argument, turning everything
+-- Testable into an IORose property, which cannot be paralellized. We
+-- need an alternative that permits parallelism by allowing exceptions
+-- to propagate. This is a modified clone of code from
+-- Test.QuickCheck.Property.
+
+class TestableNoCatch prop where
+  propertyNoCatch :: prop -> Property
+
+instance TestableNoCatch Discard where
+  propertyNoCatch _ = propertyNoCatch rejected
+
+instance TestableNoCatch Bool where
+  propertyNoCatch = propertyNoCatch . liftBool
+
+instance TestableNoCatch Result where
+  propertyNoCatch = MkProperty . return . MkProp . return
+
+instance TestableNoCatch Prop where
+  propertyNoCatch p = MkProperty . return $ p
+
+instance TestableNoCatch prop => TestableNoCatch (Gen prop) where
+  propertyNoCatch mp = MkProperty $ do p <- mp; unProperty (againNoCatch $ propertyNoCatch p)
+
+instance TestableNoCatch Property where
+  propertyNoCatch p = p
+
+againNoCatch (MkProperty gen) = MkProperty $ do
+  MkProp rose <- gen
+  return . MkProp $ fmap (\res -> res{ abort = False }) rose

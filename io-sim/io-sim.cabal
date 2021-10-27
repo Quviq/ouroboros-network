@@ -63,7 +63,8 @@ library
                        -Widentities
                        -Wredundant-constraints
                        -threaded
-                       +RTS -N -RTS
+                       -rtsopts
+                       +RTS -N -qn1 -RTS
   if flag(asserts)
      ghc-options:      -fno-ignore-asserts
 
@@ -89,5 +90,6 @@ test-suite test
   ghc-options:         -Wall
                        -fno-ignore-asserts
                        -threaded
+                       -rtsopts
                        +RTS -N -RTS
 
