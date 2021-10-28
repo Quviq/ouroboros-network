@@ -62,10 +62,7 @@ library
                        -Wpartial-fields
                        -Widentities
                        -Wredundant-constraints
-                       -threaded
-                       -rtsopts
-                       -feager-blackholing
-                       +RTS -N -qn1 -RTS
+
   if flag(asserts)
      ghc-options:      -fno-ignore-asserts
 
@@ -90,7 +87,5 @@ test-suite test
 
   ghc-options:         -Wall
                        -fno-ignore-asserts
-                       -threaded
-                       -rtsopts
-                       +RTS -N -RTS
+
 
