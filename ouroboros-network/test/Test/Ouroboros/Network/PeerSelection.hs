@@ -264,6 +264,12 @@ prop_explore_governor_nolivelock =
     -- events to avoid unreasonably slow tests. This may be because
     -- the governor becomes slower over time with priority-based
     -- scheduling, or because IOSimPOR's data structures grow.
+
+    -- This test currently fails, because of a broken assertion in
+    -- Ouroboros.Network.PeerSelection.Governor.ActivePeers, which
+    -- checks that a newly promoted warm peer is a member of the set
+    -- of established peers. This may not be true if the promotion is
+    -- delayed by a race condition.
     
     prop'_explore_governor_nolivelock id 500
     
@@ -287,11 +293,13 @@ check_governor_nolivelock n trace0 =
                "first 50 events: " ++ (unlines . map show . take 50 $ es)) $
             property False
 
+{-
 showTrace = break . show
   where break s | "(Trace " `isPrefixOf` s = "\n" ++ breaks
                 | otherwise                = breaks
          where breaks | null s    = []
                       | otherwise = head s : break (tail s)
+-}
 
 -- | Scan the trace and return any occurrence where we have at least threshold
 -- events before virtual time moves on. Return the tail of the trace from that
