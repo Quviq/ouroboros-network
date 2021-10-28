@@ -257,18 +257,22 @@ prop_governor_nolivelock env =
 
 prop_explore_governor_nolivelock :: GovernorMockEnvironment -> Property
 prop_explore_governor_nolivelock =
-    prop'_explore_governor_nolivelock (withStepTimelimit 1000)
-    
-prop'_explore_governor_nolivelock :: ExplorationSpec -> GovernorMockEnvironment -> Property
-prop'_explore_governor_nolivelock spec env =
+
     -- Simulation steps take longer and longer as simulated time
-    -- advances; we limit the test to 1000 governor events to avoid
-    -- hitting the simulator's step time limit. This may be because the
-    -- governor becomes slower, or because IOSimPOR's data structures
-    -- grow. 
+    -- advances; running time for this property is quadratic in the
+    -- number of events explored. We limit the test to 500 governor
+    -- events to avoid unreasonably slow tests. This may be because
+    -- the governor becomes slower over time with priority-based
+    -- scheduling, or because IOSimPOR's data structures grow.
+    
+    prop'_explore_governor_nolivelock id 500
+    
+prop'_explore_governor_nolivelock :: ExplorationSpec -> Int -> GovernorMockEnvironment -> Property
+prop'_explore_governor_nolivelock spec len env =
     exploreGovernorInMockEnvironment spec env $ \_ trace ->
-      counterexample (showTrace trace) $
-      check_governor_nolivelock 5000 trace
+      -- counterexample (showTrace trace) $
+      -- whenfail (pPrint env) $
+      check_governor_nolivelock len trace
 
 check_governor_nolivelock n trace0 =
     let trace = take n .
